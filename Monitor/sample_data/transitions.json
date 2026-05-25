@@ -1,0 +1,86 @@
+{
+  "nodes": [
+    {
+      "screen_id": "37017f3b56f7f925",
+      "index": 0,
+      "snapshots": ["000001"],
+      "first_snapshot_id": "000001",
+      "last_snapshot_id": "000001"
+    },
+    {
+      "screen_id": "0c09d2b81a71cf9c",
+      "index": 1,
+      "snapshots": ["000002"],
+      "first_snapshot_id": "000002",
+      "last_snapshot_id": "000002"
+    },
+    {
+      "screen_id": "8d701c0eade2ac30",
+      "index": 2,
+      "snapshots": ["000003","000005","000010"],
+      "first_snapshot_id": "000003",
+      "last_snapshot_id": "000010"
+    },
+    {
+      "screen_id": "d82e7288728bcd51",
+      "index": 3,
+      "snapshots": ["000004"],
+      "first_snapshot_id": "000004",
+      "last_snapshot_id": "000004"
+    },
+    {
+      "screen_id": "36cb586fec526bc1",
+      "index": 4,
+      "snapshots": ["000008","000013","000016"],
+      "first_snapshot_id": "000008",
+      "last_snapshot_id": "000016"
+    }
+  ],
+  "edges": [
+    {
+      "src": "37017f3b56f7f925",
+      "dst": "0c09d2b81a71cf9c",
+      "event_type": "tap",
+      "event_key": "tap@el_0047",
+      "description": null,
+      "src_snapshot_id": "000001",
+      "dst_snapshot_id": "000002"
+    },
+    {
+      "src": "0c09d2b81a71cf9c",
+      "dst": "8d701c0eade2ac30",
+      "event_type": "tap",
+      "event_key": "tap@el_0055",
+      "description": null,
+      "src_snapshot_id": null,
+      "dst_snapshot_id": "000003"
+    },
+    {
+      "src": "8d701c0eade2ac30",
+      "dst": "d82e7288728bcd51",
+      "event_type": "tap",
+      "event_key": "tap@el_0031",
+      "description": null,
+      "src_snapshot_id": null,
+      "dst_snapshot_id": "000004"
+    },
+    {
+      "src": "d82e7288728bcd51",
+      "dst": "8d701c0eade2ac30",
+      "event_type": "tap",
+      "event_key": "tap@el_0058",
+      "description": null,
+      "src_snapshot_id": null,
+      "dst_snapshot_id": "000005"
+    },
+    {
+      "src": "8d701c0eade2ac30",
+      "dst": "36cb586fec526bc1",
+      "event_type": "tap",
+      "event_key": "tap@el_0030",
+      "description": null,
+      "src_snapshot_id": null,
+      "dst_snapshot_id": "000008"
+    }
+  ]
+}
