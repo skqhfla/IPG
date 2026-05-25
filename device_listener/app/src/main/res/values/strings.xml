@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IPG Listener</string>
+    <string name="service_label">IPG Accessibility Listener</string>
+    <string name="service_description">Emits AccessibilityEvent stream to logcat for IPG (research). Logs Toast, window state/content changes, scrolls, and clicks under tag IPG_EVT.</string>
+
+    <string name="title_status">IPG Listener</string>
+    <string name="status_enabled">Service is ENABLED.\n\nlogcat tag: IPG_EVT\n\nTail from PC:\n  adb logcat -s IPG_EVT:I</string>
+    <string name="status_disabled">Service is DISABLED.\n\nTap below to open Accessibility settings, then enable “IPG Accessibility Listener”.\n\nOr from PC:\n  adb shell settings put secure enabled_accessibility_services dev.ipg.listener/.IpgAccessibilityService\n  adb shell settings put secure accessibility_enabled 1</string>
+    <string name="open_settings">Open Accessibility Settings</string>
+    <string name="edit_filter">Edit Filter</string>
+    <string name="cfg_title">Filter / appLabel</string>
+    <string name="cfg_app_label_hint">App label (auto-filled from selection)</string>
+    <string name="cfg_search_hint">Search apps…</string>
+    <string name="cfg_reset">Reset</string>
+    <string name="cfg_save">Save</string>
+    <string name="cfg_no_filter">No filter — capture all packages, flat output.</string>
+</resources>

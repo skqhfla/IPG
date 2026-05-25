@@ -1,0 +1,12 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+gradle/wrapper/gradle-wrapper.jar
+captures/
+# 수동 비교 산출물 (수십 MB) — repo에 포함하지 않음
+compare/
+# 호스트 측 테스트 출력
+dumps/
+

@@ -2,3 +2,11 @@ build/
 *.pyc
 __pycache__/
 output/
+outputs_APK/
+
+# YOLO 가중치 — 용량 큼(수십 MB), GitHub 한도 회피. 별도 배포.
+*.pt
+*.onnx
+
+# 임시 스크린샷
+.tmp_*.png
