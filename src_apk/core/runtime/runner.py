@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 import logging
 import time
 
 from core.adb import ADBClient, ADBDevice
 from core.adb.a11y_event_listener import A11yEventListener, A11yServiceUnavailable
 from core.adb.metadata import collect_app_meta, collect_device_meta
+from core.adb.netstats import NetstatsSampler, resolve_uid
 from core.config import LogMode, Settings
 from core.config.app_packages import get_app_package
 from core.detection.factory import create_detector
@@ -18,6 +20,8 @@ from core.persistence.exceptions_io import ExceptionsIO
 from core.persistence.memory_loader import MemoryLoader
 from core.persistence.memory_saver import MemorySaver
 from core.persistence.run_meta_writer import RunMetaWriter
+from core.persistence.recover_graph_io import save_recover_graph
+from core.persistence.recover_graph_render import render_recover_graph_png
 from core.persistence.utg_io import load_utg, save_utg
 from core.persistence.utg_render import render_utg_png
 from core.runtime.context import RuntimeContext
@@ -35,7 +39,7 @@ class Runner:
         paths: PathManager,
         app_name: str,
         launcher_activity: str | None = None,
-        replay: bool = False,
+        rerun_source: Path | None = None,
         device_serial: str | None = None,
         adb_path: str = "adb",
         logger=None,
@@ -44,7 +48,10 @@ class Runner:
         self.paths = paths
         self.app_name = app_name
         self.launcher_activity = launcher_activity
-        self.replay = replay
+        # rerun mode: 이전 run의 memory를 로드해 미트리거 이벤트만 수행.
+        # 출력은 새 timestamp 디렉터리로 가므로 원본은 손상되지 않는다.
+        self.rerun_source = rerun_source
+        self.replay = rerun_source is not None
         self.device_serial = device_serial
         self.adb_path = adb_path
         self.logger = logger
@@ -52,7 +59,10 @@ class Runner:
         self._started_monotonic: float | None = None
         self._has_started_experiment = False
 
-        self.memory_loader = MemoryLoader(self.paths.memory)
+        memory_load_dir = (
+            (rerun_source / "json") if rerun_source is not None else self.paths.memory
+        )
+        self.memory_loader = MemoryLoader(memory_load_dir)
         self.memory_saver = MemorySaver(self.paths.memory)
         self.run_meta_writer = RunMetaWriter(self.paths.run_meta)
 
@@ -83,9 +93,14 @@ class Runner:
         return AppMemoryStore(), ScreenMemoryStore(), PacketMemoryStore()
 
     def load_utg(self) -> UTGGraphData:
-        if self.replay:
-            return load_utg(self.paths.utg_json)
-        return UTGGraphData()
+        if not self.replay:
+            return UTGGraphData()
+        source = (
+            self.rerun_source / "utg" / "utg.json"
+            if self.rerun_source is not None
+            else self.paths.utg_json
+        )
+        return load_utg(source)
 
     # -------------------------------------------------
     # lifecycle
@@ -114,6 +129,22 @@ class Runner:
             package=target_package,
         )
 
+        # 5.5. target UID resolve (패킷 측정용)
+        target_uid = resolve_uid(adb_device, target_package)
+        if target_uid is None and self.logger:
+            self.logger.warning(
+                f"[NETSTATS] {target_package} UID 해석 실패 — 패킷 측정 비활성화"
+            )
+        netstats_sampler = (
+            NetstatsSampler(
+                device=adb_device,
+                uid=target_uid,
+                logger=self.logger,
+            )
+            if target_uid is not None
+            else None
+        )
+
         # 6. context build
         self.ctx = RuntimeContext(
             settings=self.settings,
@@ -121,7 +152,9 @@ class Runner:
             adb_device=adb_device,
             target_app_name=self.app_name,
             target_package=target_package,
+            target_uid=target_uid,
             launcher_activity=self.launcher_activity,
+            netstats_sampler=netstats_sampler,
             app_memory=app_memory,
             screen_memory=screen_memory,
             packet_memory=packet_memory,
@@ -285,6 +318,16 @@ class Runner:
         if self.settings.runtime.enable_utg:
             save_utg(self.paths.utg_json, self.ctx.utg)
             render_utg_png(self.paths.utg_png, self.ctx.utg)
+
+        # recover graph (비-타겟 dump → force-recover 이력)
+        # app_memory/UTG와 분리 보존. 이벤트가 0건이어도 빈 그래프를 떨궈
+        # '이 run에서는 recover 안 일어남'을 표시한다.
+        try:
+            save_recover_graph(self.paths.recover_graph_json, self.ctx.recover_graph)
+            render_recover_graph_png(self.paths.recover_graph_png, self.ctx.recover_graph)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"[RECOVER_GRAPH] save/render 실패: {e}")
 
         # run_meta save
         run_meta = self.run_meta_writer.build_run_meta(

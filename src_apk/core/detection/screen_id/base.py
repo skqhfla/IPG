@@ -14,5 +14,7 @@ class BaseScreenIdBuilder(ABC):
         settings: Settings,
         elements: list[Element],
         screen_wh: tuple[int, int] | None = None,
+        tree_signature: tuple[str, ...] | None = None,
+        rotation: int = 0,
     ) -> ScreenID:
         raise NotImplementedError

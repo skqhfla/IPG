@@ -12,7 +12,6 @@ from core.detection.postprocess import (
 )
 from core.detection.result import DetectionResult
 from core.detection.screen_id import build_screen_id
-from core.detection.xml_parser import HierarchyMeta, parse_uia_xml
 from core.config.settings import LogMode
 
 
@@ -39,12 +38,9 @@ class HybridDetector(BaseDetector):
         xml_path = self.ctx.paths.xml / f"{snapshot_id}.xml"
 
         self.ctx.adb_device.screencap_png_to_file(screenshot_path)
-        dumped_xml = self.dump_ui_xml(xml_path)
-
-        uia_elements = []
-        meta = HierarchyMeta()
-        if dumped_xml is not None:
-            uia_elements, meta = parse_uia_xml(dumped_xml)
+        dumped_xml, uia_elements, meta, tree_signature = (
+            self.dump_and_parse_ui_xml(xml_path)
+        )
 
         model_elements = list(
             self.yolo_model.detect_elements(
@@ -66,11 +62,13 @@ class HybridDetector(BaseDetector):
                 fill_only_if_empty=True,
             )
 
+        effective_wh = self.ctx.effective_screen_wh(meta.rotation)
+
         merged = list(
             self.merge_strategy.merge(
                 uia=uia_elements,
                 model=model_elements,
-                screen_wh=self.ctx.screen_wh,
+                screen_wh=effective_wh,
             )
         )
 
@@ -97,7 +95,9 @@ class HybridDetector(BaseDetector):
         screen_id = build_screen_id(
             self.ctx.settings,
             merged,
-            screen_wh=self.ctx.screen_wh,
+            screen_wh=effective_wh,
+            tree_signature=tree_signature,
+            rotation=meta.rotation,
         )
 
         screen = Screen(
@@ -107,6 +107,9 @@ class HybridDetector(BaseDetector):
             xml_path=dumped_xml,
             window_id=meta.window_id,
             activity=meta.activity,
+            package=meta.package,
+            rotation=meta.rotation,
+            tree_signature=tree_signature,
         )
 
         debug_enabled = (

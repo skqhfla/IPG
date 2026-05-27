@@ -30,6 +30,8 @@ class LayoutBBoxScreenIdBuilder(BaseScreenIdBuilder):
         settings: Settings,
         elements: list[Element],
         screen_wh: tuple[int, int] | None = None,
+        tree_signature: tuple[str, ...] | None = None,
+        rotation: int = 0,
     ) -> ScreenID:
         if screen_wh is None:
             raise ValueError("screen_wh is required for LAYOUT_BBOX")
@@ -41,7 +43,8 @@ class LayoutBBoxScreenIdBuilder(BaseScreenIdBuilder):
             screen_wh=screen_wh,
             exclude_labels=exclude_labels,
         )
-        raw = self._serialize_layout_signature(sig)
+        body = self._serialize_layout_signature(sig)
+        raw = f"r{rotation % 4}||{body}"
         value = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
         return ScreenID(value=value)
 

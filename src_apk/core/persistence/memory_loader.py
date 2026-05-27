@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.adb.netstats import PacketStat
 from core.app_types import BBox, Element, Screen, ScreenID
 from core.memory.app_memory import AppMemoryStore
 from core.memory.packet_memory import PacketMemoryStore
@@ -68,6 +69,10 @@ class MemoryLoader:
                 elements=elements,
                 screenshot_path=Path(screenshot_path_raw) if screenshot_path_raw else None,
                 xml_path=Path(xml_path_raw) if xml_path_raw else None,
+                window_id=screen_data.get("window_id"),
+                activity=screen_data.get("activity"),
+                package=screen_data.get("package"),
+                rotation=int(screen_data.get("rotation", 0) or 0),
             )
 
             store.upsert_screen(screen)
@@ -106,8 +111,38 @@ class MemoryLoader:
         screens = payload.get("screens", {})
 
         for screen_key, screen_data in screens.items():
-            for event_key in screen_data.get("events", []):
-                store.add_event(screen_key, event_key)
+            # 신 스키마 (snapshot 단위):
+            #   {"snapshots": {snapshot_id: {"events": {event_key: stat}}}}
+            # 구 스키마 1 (snapshot 정보 없음, 카운트 있음):
+            #   {"events": {event_key: stat}}
+            # 구 스키마 2 (카운트 없음, list):
+            #   {"events": [event_key, ...]}
+            snapshots_data = screen_data.get("snapshots")
+            if isinstance(snapshots_data, dict):
+                for snapshot_id, snap_data in snapshots_data.items():
+                    events = snap_data.get("events", {})
+                    if not isinstance(events, dict):
+                        continue
+                    for event_key, stat_dict in events.items():
+                        store.add_event(
+                            screen_key,
+                            event_key,
+                            PacketStat.from_dict(stat_dict),
+                            snapshot_id=snapshot_id,
+                        )
+                continue
+
+            events = screen_data.get("events", {})
+            if isinstance(events, dict):
+                for event_key, stat_dict in events.items():
+                    store.add_event(
+                        screen_key,
+                        event_key,
+                        PacketStat.from_dict(stat_dict),
+                    )
+            else:
+                for event_key in events:
+                    store.add_event(screen_key, event_key, PacketStat())
 
         return store
 

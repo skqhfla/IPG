@@ -22,6 +22,7 @@ class PathManager:
         self.screen = self.base / "screen"
         self.memory = self.base / "json"
         self.utg = self.base / "utg"
+        self.recover = self.base / "recover"
         self.logs = self.base / "logs"
 
         self.exceptions_root = exceptions_root or Path("exceptions_APK")
@@ -48,6 +49,7 @@ class PathManager:
             self.screen,
             self.memory,
             self.utg,
+            self.recover,
             self.logs,
             self.detect_base,
             self.detect["uiauto"],
@@ -85,6 +87,19 @@ class PathManager:
     @property
     def utg_png(self) -> Path:
         return self.utg / "utg.png"
+
+    # -----------------------------
+    # recover graph (non-target dump → force-recover 이력)
+    # -----------------------------
+
+    @property
+    def recover_graph_json(self) -> Path:
+        return self.recover / "recover_graph.json"
+
+    @property
+    def recover_graph_png(self) -> Path:
+        return self.recover / "recover_graph.png"
+
     # -----------------------------
     # log
     # -----------------------------

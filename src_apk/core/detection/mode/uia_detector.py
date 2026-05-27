@@ -5,7 +5,6 @@ from core.detection.base import BaseDetector
 from core.detection.postprocess import normalize_elements
 from core.detection.result import DetectionResult
 from core.detection.screen_id import build_screen_id
-from core.detection.xml_parser import HierarchyMeta, parse_uia_xml
 
 
 class UIAutomatorDetector(BaseDetector):
@@ -16,20 +15,20 @@ class UIAutomatorDetector(BaseDetector):
         self.ctx.adb_device.screencap_png_to_file(screenshot_path)
 
         xml_path = self.ctx.paths.xml / f"{snapshot_id}.xml"
-        dumped_xml = self.dump_ui_xml(xml_path)
-
-        if dumped_xml is None:
-            elements = []
-            meta = HierarchyMeta()
-        else:
-            elements, meta = parse_uia_xml(dumped_xml)
+        dumped_xml, elements, meta, tree_signature = (
+            self.dump_and_parse_ui_xml(xml_path)
+        )
 
         elements = normalize_elements(elements)
+
+        effective_wh = self.ctx.effective_screen_wh(meta.rotation)
 
         screen_id = build_screen_id(
             self.ctx.settings,
             elements,
-            screen_wh=self.ctx.screen_wh,
+            screen_wh=effective_wh,
+            tree_signature=tree_signature,
+            rotation=meta.rotation,
         )
 
         screen = Screen(
@@ -39,6 +38,9 @@ class UIAutomatorDetector(BaseDetector):
             xml_path=dumped_xml,
             window_id=meta.window_id,
             activity=meta.activity,
+            package=meta.package,
+            rotation=meta.rotation,
+            tree_signature=tree_signature,
         )
 
         return DetectionResult(

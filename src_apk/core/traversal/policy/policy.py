@@ -9,6 +9,16 @@ from core.runtime.context import RuntimeContext
 
 Action = dict[str, Any]
 
+# tap 후보에서 제외할 element class. 단순 표시 위주의 텍스트 노드는
+# 의미 있는 화면 전환을 만드는 경우가 거의 없고, 클릭 가능 표시(is_actionable)가
+# 잡혀도 부모 컨테이너의 라벨일 때가 많아 시도해도 같은 화면에서 noise만 쌓인다.
+# - YOLO 경로: "text"
+# - UIA 경로: simplify_android_class가 마지막 segment만 남기므로
+#   "TextView" / "AppCompatTextView" / "MaterialTextView" 등이 모두 "*TextView"로 들어옴
+def _is_tap_excluded_class(cls: str) -> bool:
+    s = (cls or "").lower()
+    return s == "text" or s.endswith("textview")
+
 @dataclass(slots=True)
 class Policy:
     logger: Any = None
@@ -69,13 +79,19 @@ class Policy:
             if swipe is not None:
                 return swipe
 
-        if ctx.screen_wh is not None:
+        # 현재 화면 회전에 맞춘 실효 wh — landscape에서 device-native portrait wh를
+        # 그대로 쓰면 fallback swipe가 화면 밖 좌표가 된다.
+        effective_wh = ctx.effective_screen_wh(getattr(screen, "rotation", 0))
+        if effective_wh is None:
+            effective_wh = ctx.screen_wh
+
+        if effective_wh is not None:
 
             streak = ctx.same_screen_streak
             same_threshold = ctx.settings.traversal.same_screen_threshold
             back_threshold = ctx.settings.traversal.back_threshold
 
-            width, height = ctx.screen_wh
+            width, height = effective_wh
 
             if streak >= back_threshold:
                 return {
@@ -119,6 +135,7 @@ class Policy:
             if element.is_actionable
             and not element.is_scrollable
             and not element.executed_events
+            and not _is_tap_excluded_class(str(getattr(element, "cls", "")))
         ]
 
         def priority(el: Element) -> tuple[int, int, int]:
@@ -128,8 +145,6 @@ class Policy:
                 "checkbox": 1,
                 "switch": 1,
                 "icon": 2,
-                "text": 3,
-                "textview": 3,
                 "imageview": 4,
             }.get(str(getattr(el, "cls", "")).lower(), 5)
 

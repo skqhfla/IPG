@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timezone
 import time
 from pathlib import Path
 
+from core.adb.netstats import PacketStat
 from core.app_types import EventType, Screen
 from core.detection.result import DetectionResult
 from core.detection.draw import draw_elements_on_image
+from core.graph.recover_graph import RecoverEvent
 from core.runtime.context import RuntimeContext
 from core.config.settings import UiDetectionMode
 from core.config.settings import LogMode
@@ -21,6 +24,8 @@ class RuntimeLoop:
         self.on_before_first_detection = on_before_first_detection
         self._first_detection_started = False
         self.interval_sec = ctx.settings.traversal.interval_sec
+        self.packet_capture_time = ctx.settings.packet.capture_time_sec
+        self.packet_threshold = ctx.settings.packet.packet_threshold
 
     def run_step(self) -> None:
         assert self.ctx.detector is not None
@@ -36,6 +41,18 @@ class RuntimeLoop:
 
         if self.ctx.current_screen is None:
             before_det = self._detect_next_screen()
+
+            if not self._is_target_screen(before_det.screen):
+                # 비-타겟 화면(런처/시스템 다이얼로그/외부 앱)은 app_memory에
+                # 절대 등록하지 않는다. 등록 시 screen_id/transition/element가
+                # target 앱 데이터에 섞여 영구 contamination이 된다.
+                self._handle_non_target_screen(
+                    snapshot_id=before_det.snapshot_id,
+                    screen=before_det.screen,
+                    stage="before",
+                )
+                return
+
             before_screen = self._register_detection(
                 det=before_det,
                 snapshot_id=before_det.snapshot_id,
@@ -48,6 +65,7 @@ class RuntimeLoop:
 
             self.ctx.current_screen = before_screen
             self.ctx.current_screen_key = before_screen_key
+            self.ctx.current_snapshot_id = before_det.snapshot_id
         else:
             before_det = None
             before_screen = self.ctx.current_screen
@@ -55,6 +73,9 @@ class RuntimeLoop:
 
         assert before_screen is not None
         assert before_screen_key is not None
+        # 이벤트는 이 시점 화면(snapshot) 위에서 실행되므로, packet 측정의
+        # 귀속 단위로 before_snapshot_id를 잡아 둔다.
+        before_snapshot_id = self.ctx.current_snapshot_id
 
         action = self.ctx.traverser.choose_action(
             ctx=self.ctx,
@@ -77,17 +98,34 @@ class RuntimeLoop:
         # '화면 전환이 있었는지'를 판정한다 (refresh/scroll vs navigation 구분).
         before_fg = self.ctx.foreground_state.get()
 
+        # 이벤트 직전 UID 패킷 누적치 snapshot. capture_time_sec 후 다시 찍어
+        # 차분을 packet_memory에 기록한다 (None이면 측정 비활성).
+        before_stat = (
+            self.ctx.netstats_sampler.sample()
+            if self.ctx.netstats_sampler is not None
+            else None
+        )
+
         event_key = self.ctx.executor.execute(action)
 
         scrolled_progress = False
+        page_changed = False
         if is_scroll_swipe:
-            scrolled_progress = self._handle_scroll_feedback(
+            scrolled_progress, page_changed = self._handle_scroll_feedback(
                 action=action,
                 before_screen_key=before_screen_key,
             )
 
-        if self.interval_sec > 0:
-            time.sleep(self.interval_sec)
+        # 패킷 측정 윈도우. interval_sec 대신 capture_time_sec 사용.
+        if self.packet_capture_time > 0:
+            time.sleep(self.packet_capture_time)
+
+        self._record_packet_delta(
+            screen_key=before_screen_key,
+            snapshot_id=before_snapshot_id,
+            event_key=event_key,
+            before=before_stat,
+        )
 
         # pull-to-refresh로 의심되는 상황(맨 위에서 풀 방향으로 swipe했지만
         # 스크롤 이벤트가 없음)에서는 새로고침 스피너가 가라앉도록 추가 settle.
@@ -100,6 +138,30 @@ class RuntimeLoop:
 
         after_det = self._detect_next_screen()
 
+        if not self._is_target_screen(after_det.screen):
+            # 이벤트는 이미 실행됐고 packet도 측정됐다 — 그건 그대로 두고,
+            # 비-타겟 화면을 app_memory/screen_memory/utg에 등록하지 않는다.
+            # before_screen의 element는 'executed'로 마킹해 다음 라운드에서
+            # 같은 액션을 다시 골라 같은 외부 화면으로 빠지는 걸 막는다
+            # (scroll swipe는 _handle_scroll_feedback이 이미 tried 마킹).
+            identity_key = action.get("identity_key")
+            if identity_key and not is_scroll_swipe:
+                self.ctx.app_memory.mark_event_executed(
+                    screen_key=before_screen_key,
+                    identity_key=identity_key,
+                    event_key=event_key,
+                )
+            self._flush_memory()
+            self._handle_non_target_screen(
+                snapshot_id=after_det.snapshot_id,
+                screen=after_det.screen,
+                stage="after",
+                src_screen_key=before_screen_key,
+                src_snapshot_id=before_snapshot_id,
+                src_event_key=event_key,
+            )
+            return
+
         # 스크롤 swipe 동안 activity 전환(WINDOW_STATE_CHANGED)이 없었다면
         # 스크롤·새로고침(pull-to-refresh)·로딩 스피너 모두 같은 화면의
         # sub-state이므로, 콘텐츠 해시가 달라져도 screen_id를 유지한다.
@@ -109,7 +171,7 @@ class RuntimeLoop:
         # scrolled_progress(VIEW_SCROLLED 수신)는 foreground 정보가 없을 때의
         # 보조 신호.
         keep_same_screen = False
-        if is_scroll_swipe and before_screen is not None:
+        if is_scroll_swipe and before_screen is not None and not page_changed:
             after_fg = self.ctx.foreground_state.get()
             activity_unchanged = (
                 before_fg is not None
@@ -135,6 +197,8 @@ class RuntimeLoop:
             snapshot_id=after_det.snapshot_id,
         )
         after_screen_key = after_screen.screen_id.to_key()
+        # 다음 step의 before_snapshot_id가 될 값을 미리 저장한다.
+        self.ctx.current_snapshot_id = after_det.snapshot_id
 
         # 스크롤 swipe는 _handle_scroll_feedback에서 이미 swipe 메모리를
         # 기록하므로, executed_events 중복 기록을 피하기 위해 제외한다.
@@ -199,27 +263,66 @@ class RuntimeLoop:
     # helpers
     # -------------------------------------------------
 
+    def _record_packet_delta(
+        self,
+        *,
+        screen_key: str,
+        snapshot_id: str | None,
+        event_key: str,
+        before: PacketStat | None,
+    ) -> None:
+        sampler = self.ctx.netstats_sampler
+        if sampler is None or before is None:
+            return
+
+        after = sampler.sample()
+        if after is None:
+            return
+
+        delta = after.delta(before)
+        if delta.total_packets() < self.packet_threshold:
+            return
+
+        self.ctx.packet_memory.add_event(
+            screen_key=screen_key,
+            snapshot_id=snapshot_id,
+            event_key=event_key,
+            stat=delta,
+        )
+
+        if self.ctx.logger:
+            self.ctx.logger.info(
+                f"[PACKET] screen={screen_key} snapshot={snapshot_id or '-'} "
+                f"event={event_key} "
+                f"tx_pkts={delta.tx_packets} rx_pkts={delta.rx_packets} "
+                f"tx_bytes={delta.tx_bytes} rx_bytes={delta.rx_bytes}"
+            )
+
     def _handle_scroll_feedback(
         self,
         *,
         action: dict,
         before_screen_key: str,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """
         Scrollable element 대상 swipe 직후, VIEW_SCROLLED 이벤트를 통해
         해당 방향이 더 진행 가능한지(미고갈) / 끝까지 도달했는지(고갈) 판정해
         element 및 screen-level memory에 기록.
 
         Returns:
-            콘텐츠가 실제로 이동했는지 여부(VIEW_SCROLLED 수신 & 미고갈).
-            True이면 호출자가 '같은 화면 스크롤'로 간주해 screen_id를 유지한다.
+            (scrolled_progress, page_changed)
+            - scrolled_progress: VIEW_SCROLLED 수신 여부. True면 호출자가
+              '같은 화면 스크롤'로 간주해 screen_id를 유지한다.
+            - page_changed: ViewPager/HorizontalScrollView류에서 가로 페이지
+              전환이 일어났는지. True면 콘텐츠가 사실상 다른 화면이므로 호출자가
+              keep_same_screen 휴리스틱을 건너뛰어야 한다.
         """
         listener = self.ctx.a11y_listener
         direction = action.get("direction")
         identity_key = action.get("identity_key")
 
         if not direction or not identity_key:
-            return False
+            return False, False
 
         # 무조건 tried 마킹 — 시도는 했으므로
         self.ctx.app_memory.mark_swipe_tried(
@@ -278,7 +381,57 @@ class RuntimeLoop:
         # exhausted와 무관하게 같은 화면(스크롤 sub-state)으로 간주한다.
         # (exhausted를 묶으면 짧은 리스트에서 1회 스크롤=끝 도달 시 화면이
         #  분절되어 A↔B 핑퐁 → node_loop 조기 종료가 발생함.)
-        return evt is not None
+        scrolled_progress = evt is not None
+        page_changed = self._is_page_change_scroll(summary)
+        if page_changed and self.ctx.logger:
+            d = evt.raw if evt is not None else {}
+            src = d.get("source") or {}
+            self.ctx.logger.info(
+                f"[SCROLL] page-change 감지: "
+                f"class={d.get('class')} src_class={src.get('class')} "
+                f"total=({summary.total_dx},{summary.total_dy})"
+            )
+        return scrolled_progress, page_changed
+
+    @staticmethod
+    def _is_page_change_scroll(summary) -> bool:
+        """
+        수집된 VIEW_SCROLLED 요약이 ViewPager류의 가로 페이지 전환인지 판정.
+
+        ViewPager / ViewPager2 / HorizontalScrollView 의 가로 스와이프는 같은
+        Activity 안에서 일어나지만 콘텐츠는 사실상 다른 화면이다. 일반 세로
+        스크롤(ScrollView/RecyclerView)과 분리해야 keep_same_screen 휴리스틱이
+        화면 전환을 잘못 병합하지 않는다.
+
+        판정 조건(모두 만족):
+          1) 마지막 VIEW_SCROLLED 의 class 또는 source.class 가
+             ViewPager / HorizontalScrollView 계열
+          2) 누적 가로 이동(|total_dx|)이 일정 픽셀 이상 (잔여 settling 배제)
+          3) 가로 이동이 세로 이동보다 우세 (|total_dx| > |total_dy|)
+        """
+        if summary is None or summary.last_evt is None:
+            return False
+
+        raw = summary.last_evt.raw or {}
+        cls = raw.get("class") or ""
+        src = raw.get("source") or {}
+        src_cls = src.get("class") if isinstance(src, dict) else ""
+        src_cls = src_cls or ""
+
+        pager_markers = ("ViewPager", "HorizontalScrollView")
+        is_pager = any(m in cls or m in src_cls for m in pager_markers)
+        if not is_pager:
+            return False
+
+        abs_dx = abs(summary.total_dx or 0)
+        abs_dy = abs(summary.total_dy or 0)
+
+        # 잔여 settling(예: delta=(11,0))은 제외하기 위한 절대 최소치
+        if abs_dx < 100:
+            return False
+
+        # 가로 우세 (세로 스크롤과 동시에 약간의 가로 떨림이 있더라도 제외)
+        return abs_dx > abs_dy
 
     def _ensure_scroll_overlap(
         self,
@@ -451,10 +604,138 @@ class RuntimeLoop:
         self.ctx.same_screen_streak = 0
         self.invalidate_current_screen()
 
+    def _is_target_screen(self, screen: Screen) -> bool:
+        """
+        Detection 결과의 <hierarchy package=...>가 타겟 앱과 일치하는가.
+
+        - package 속성이 비어 있는 구버전 dump / YOLO-only 화면은 검증할 근거가
+          없으므로 permissive하게 True를 반환한다 (회귀 방지).
+        - target_package가 비어 있으면 게이팅이 꺼진 상태로 간주.
+        """
+        target = self.ctx.target_package
+        pkg = screen.package
+        if not target or not pkg:
+            return True
+        return pkg == target
+
+    def _handle_non_target_screen(
+        self,
+        *,
+        snapshot_id: str,
+        screen: Screen,
+        stage: str,
+        src_screen_key: str | None = None,
+        src_snapshot_id: str | None = None,
+        src_event_key: str | None = None,
+    ) -> None:
+        """
+        타겟 외 화면이 dump됐을 때의 핸들러.
+        - app_memory/screen_memory/utg에 등록하지 않는다.
+        - foreground_state의 1초 임계를 우회해 즉시 recover를 강제한다 —
+          A11y가 WINDOW_STATE_CHANGED를 놓쳐 state가 stale일 수 있기 때문.
+        - 이벤트는 ctx.recover_graph에 기록되며, dst 화면은 다음 target detection
+          성공 시점에 _register_detection이 채운다.
+        """
+        if self.ctx.logger:
+            self.ctx.logger.warning(
+                f"[GATE] non-target screen detected: stage={stage} "
+                f"snapshot={snapshot_id} pkg={screen.package!r} "
+                f"activity={screen.activity!r} target={self.ctx.target_package} — "
+                f"skip registration + force recover"
+            )
+
+        event = RecoverEvent(
+            step=self.ctx.step_count,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            stage=stage,
+            snapshot_id=snapshot_id,
+            non_target_package=screen.package,
+            non_target_activity=screen.activity,
+            src_screen_key=src_screen_key,
+            src_snapshot_id=src_snapshot_id,
+            src_event_key=src_event_key,
+        )
+        self.ctx.recover_graph.add(event)
+
+        method, recovered = self._force_recover_to_target()
+        event.recover_method = method
+        event.recovered_to_target = recovered
+
+        self.invalidate_current_screen()
+
+    # 비-타겟 화면에서 BACK으로 dismiss를 시도할 때의 최대 횟수.
+    # 1~2회면 대부분의 permission/popup/외부 앱 deep-link가 닫히고 직전
+    # 타겟 화면으로 돌아간다 — 너무 많이 누르면 타겟 앱 stack도 pop되어
+    # main 또는 종료로 빠지므로 작게 잡는다.
+    BACK_RECOVER_MAX_PRESSES = 2
+    BACK_RECOVER_SETTLE_SEC = 0.6
+
+    def _force_recover_to_target(self) -> tuple[str, bool]:
+        """
+        비-타겟 화면에서 타겟으로 복귀. 단계적 escalation:
+          1) BACK 1~2회 (popup/dialog/외부 deep-link dismiss)
+             → 직전 타겟 deep 화면을 그대로 살릴 수 있다
+          2) bring_to_front (home + LAUNCHER intent)
+             → stack을 main으로 리셋하지만 프로세스는 유지
+          3) launch_app (force-stop + relaunch)
+             → 마지막 수단, 앱 상태 전부 리셋
+
+        Returns:
+            (method, recovered_to_target)
+            method: 'back' | 'bring_to_front' | 'launch_app'
+        """
+        device = self.ctx.adb_device
+        target = self.ctx.target_package
+        current_pkg = ""
+
+        # 1) BACK escalation — popup/dialog/외부 앱은 보통 1~2회로 닫힌다.
+        for i in range(self.BACK_RECOVER_MAX_PRESSES):
+            device.back()
+            time.sleep(self.BACK_RECOVER_SETTLE_SEC)
+            current_pkg = device.get_foreground_package()
+            if current_pkg == target:
+                if self.ctx.logger:
+                    self.ctx.logger.info(
+                        f"[RECOVER:FORCE] back ×{i + 1} → target restored"
+                    )
+                # back으로 복귀하면 stack 손실이 없으므로 recover_count는
+                # 올리지 않는다 (이 카운터는 'main으로 리셋된 횟수'에 한정).
+                return "back", True
+
+        if self.ctx.logger and self.BACK_RECOVER_MAX_PRESSES > 0:
+            self.ctx.logger.warning(
+                f"[RECOVER:FORCE] back ×{self.BACK_RECOVER_MAX_PRESSES} 실패 "
+                f"(current={current_pkg!r}), bring_to_front 진행"
+            )
+
+        # 2) bring_to_front — stack을 main으로 리셋.
+        device.bring_to_front(target, self.ctx.launcher_activity)
+        self.ctx.foreground_recover_count += 1
+        time.sleep(1.0)
+
+        after_soft = device.get_foreground_package()
+        if after_soft == target:
+            if self.ctx.logger:
+                self.ctx.logger.info("[RECOVER:FORCE] bring_to_front success")
+            return "bring_to_front", True
+
+        if self.ctx.logger:
+            self.ctx.logger.warning(
+                f"[RECOVER:FORCE] bring_to_front failed: current={after_soft}, "
+                f"target={target}. restarting app."
+            )
+
+        # 3) 마지막 수단 — 프로세스 재시작.
+        device.launch_app(target, self.ctx.launcher_activity)
+        self.ctx.app_restart_count += 1
+        time.sleep(1.0)
+
+        after_hard = device.get_foreground_package()
+        return "launch_app", (after_hard == target)
+
     def _recover_if_needed(self) -> None:
         state = self.ctx.foreground_state
         target = self.ctx.target_package
-        device = self.ctx.adb_device
 
         fg = state.get()
         if fg is None:
@@ -475,36 +756,13 @@ class RuntimeLoop:
                 f"target={target}"
             )
 
-        # 1) soft recover
-        device.bring_to_front(
-            target,
-            self.ctx.launcher_activity,
-        )
-        self.ctx.foreground_recover_count += 1
+        # _force_recover_to_target과 동일한 단계적 전략 (BACK → bring_to_front
+        # → launch_app). BACK이 성공하면 타겟 stack을 보존한 채 복귀하므로
+        # main으로 강제 리셋되는 것을 피한다.
+        method, recovered = self._force_recover_to_target()
         self.invalidate_current_screen()
-
-        time.sleep(1.0)
-
-        # 2) verify
-        after_soft = device.get_foreground_package()
-        if after_soft == target:
-            if self.ctx.logger:
-                self.ctx.logger.info("[RECOVER] bring_to_front success")
-            return
-
-        if self.ctx.logger:
-            self.ctx.logger.warning(
-                f"[RECOVER] bring_to_front failed: current={after_soft}, "
-                f"target={target}. restarting app."
-            )
-
-        # 3) hard recover
-        device.launch_app(
-            target,
-            self.ctx.launcher_activity,
-        )
-        self.ctx.app_restart_count += 1
-        self.invalidate_current_screen()
+        if self.ctx.logger and recovered:
+            self.ctx.logger.info(f"[RECOVER] success via {method}")
 
         time.sleep(1.0)
         
@@ -531,6 +789,12 @@ class RuntimeLoop:
             ),
         )
         screen_key = screen.screen_id.to_key()
+
+        # 직전 force-recover 이벤트의 dst를 첫 target detection 시점에 채운다.
+        pending = self.ctx.recover_graph.last_pending()
+        if pending is not None:
+            pending.dst_screen_key = screen_key
+            pending.dst_snapshot_id = snapshot_id
 
         self.ctx.app_memory.add_snapshot(screen_key, snapshot_id)
 
@@ -583,9 +847,9 @@ class RuntimeLoop:
 
     def _flush_memory(self) -> None:
         """
-        transition 발생 시점에 app_memory / screen_memory를 디스크에 즉시 반영.
-        runner.finalize()의 종료 flush와 별개로, 도중 비정상 종료 시에도
-        최신 transition 기준 상태가 남도록 한다.
+        transition 발생 시점에 메모리를 디스크에 즉시 반영. runner.finalize()의
+        종료 flush와 별개로, 도중 비정상 종료 시에도 최신 transition 기준
+        상태가 남도록 한다.
         """
         saver = getattr(self.ctx, "memory_saver", None)
         if saver is None:
@@ -593,6 +857,7 @@ class RuntimeLoop:
         try:
             saver.save_app_memory(self.ctx.app_memory)
             saver.save_screen_memory(self.ctx.screen_memory)
+            saver.save_packet_memory(self.ctx.packet_memory)
         except Exception as e:
             if self.ctx.logger:
                 self.ctx.logger.warning(f"[MEMORY] incremental flush 실패: {e}")

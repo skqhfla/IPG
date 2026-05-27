@@ -9,10 +9,14 @@ def build_screen_id(
     settings: Settings,
     elements: list[Element],
     screen_wh: tuple[int, int] | None = None,
+    tree_signature: tuple[str, ...] | None = None,
+    rotation: int = 0,
 ) -> ScreenID:
     builder = create_screen_id_builder(settings.screen_id.kind)
     return builder.build(
         settings=settings,
         elements=elements,
         screen_wh=screen_wh,
+        tree_signature=tree_signature,
+        rotation=rotation,
     )

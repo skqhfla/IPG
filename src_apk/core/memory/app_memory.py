@@ -294,6 +294,8 @@ class AppMemoryStore:
                 "screen_id": screen.screen_id.to_key(),
                 "window_id": screen.window_id,
                 "activity": screen.activity,
+                "package": screen.package,
+                "rotation": screen.rotation,
                 "snapshots": sorted(self._snapshots.get(screen_key, set())),
                 "screenshot_path": (
                     str(screen.screenshot_path) if screen.screenshot_path else None

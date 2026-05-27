@@ -14,6 +14,8 @@ class HashScreenIdBuilder(BaseScreenIdBuilder):
         settings: Settings,
         elements: list[Element],
         screen_wh: tuple[int, int] | None = None,
+        tree_signature: tuple[str, ...] | None = None,
+        rotation: int = 0,
     ) -> ScreenID:
         rows: list[tuple[str, int, int, int, int]] = []
 
@@ -24,10 +26,11 @@ class HashScreenIdBuilder(BaseScreenIdBuilder):
 
         rows.sort(key=lambda x: (x[0], x[2], x[1], x[4], x[3]))
 
-        raw = "||".join(
+        body = "||".join(
             f"{cls_name}|{x1},{y1},{x2},{y2}"
             for cls_name, x1, y1, x2, y2 in rows
         )
+        raw = f"r{rotation % 4}||{body}"
 
         value = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
         return ScreenID(value=value)

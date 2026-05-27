@@ -44,23 +44,37 @@ class ScrollSummary:
 
 
 class A11yServiceUnavailable(RuntimeError):
-    """device_listener APK 미설치 / 접근성 OFF / 서비스 미응답 시 발생."""
+    """device_listener APK(main+test) 미설치 또는 instrumentation 미응답 시 발생."""
 
 
 class A11yEventListener:
     """
-    device_listener APK가 logcat tag `IPG_EVT`로 흘리는 JSON 이벤트를
-    백그라운드 스레드로 수신·파싱해 queue에 누적한다.
+    device_listener instrumentation 을 `am instrument -w` 로 띄우고,
+    logcat tag `IPG_EVT` 로 흘리는 JSON 이벤트를 백그라운드 스레드로
+    수신·파싱해 queue 에 누적한다.
 
-    `request_dump_and_wait()`는 broadcast 전송 + 다음 DUMP_WRITTEN 수신을
-    한 호출로 묶는다 (clear → broadcast → wait).
+    `request_dump_and_wait()` 는 sentinel 파일을 touch 해서 instrumentation 의
+    polling loop 를 깨우고 다음 DUMP_WRITTEN 을 기다린다 (clear → touch → wait).
     """
 
     TAG = "IPG_EVT"
-    BROADCAST_ACTION = "dev.ipg.listener.DUMP_NOW"
     LISTENER_PACKAGE = "dev.ipg.listener"
-    A11Y_COMPONENT = "dev.ipg.listener/.IpgAccessibilityService"
-    VERIFY_PROBE_TIMEOUT_SEC = 5.0
+    TEST_PACKAGE = "dev.ipg.listener.test"
+    TEST_RUNNER = "dev.ipg.listener.test/androidx.test.runner.AndroidJUnitRunner"
+    TEST_CLASS = "dev.ipg.listener.IpgInstrumentationTest#run"
+    # device-side path the instrumentation polls (also surfaced in SERVICE_CONNECTED.triggerFile)
+    TRIGGER_FILE = (
+        "/storage/emulated/0/Android/data/dev.ipg.listener/files/dump_now.trigger"
+    )
+    VERIFY_PROBE_TIMEOUT_SEC = 15.0  # cold dex/class init can take a few seconds
+
+    # '화면이 아직 그려지고 있다'는 신호로 간주할 a11y 이벤트 타입.
+    # wait_for_content_quiet가 이 타입 이벤트의 도착 간격으로 안정성을 판정.
+    CONTENT_EVENT_TYPES: tuple[str, ...] = (
+        "WINDOW_CONTENT_CHANGED",
+        "VIEW_SCROLLED",
+        "WINDOW_STATE_CHANGED",
+    )
 
     def __init__(
         self,
@@ -78,6 +92,13 @@ class A11yEventListener:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._proc = None
+        self._instr_proc = None
+
+        # 이벤트 도착 시 monotonic하게 증가하는 카운터. wait_for_content_quiet가
+        # 큐를 소비하지 않고 폴링으로 안정성을 판정할 수 있게 한다 — 다른
+        # 컨슈머(wait_for_scroll_evt, request_dump_and_wait)의 큐 사용과 충돌 없음.
+        self._content_seq = 0
+        self._seq_lock = threading.Lock()
 
     # -----------------------------
     # lifecycle
@@ -87,7 +108,17 @@ class A11yEventListener:
         if self._thread is not None:
             return
 
-        # -v raw: 메시지 본문(JSON)만 출력. -T 1: 시작 시점 이후 라인만.
+        # 1. instrumentation 을 먼저 띄운다. `am instrument -w` 는 test 가 끝날
+        #    때까지 block 하므로, test 의 while-loop 가 도는 동안 이 Popen 도 살아있다.
+        #    NOTE: client.popen prepends only `adb` (no `shell`), so we add it ourselves.
+        self._instr_proc = self._client.popen([
+            "shell",
+            "am", "instrument", "-w", "-m",
+            "-e", "class", self.TEST_CLASS,
+            self.TEST_RUNNER,
+        ])
+
+        # 2. logcat tail. -v raw: 메시지 본문(JSON)만. -T 1: 시작 시점 이후 라인만.
         self._proc = self._client.popen(
             ["logcat", "-s", f"{self.TAG}:I", "-v", "raw", "-T", "1"],
         )
@@ -111,6 +142,20 @@ class A11yEventListener:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._instr_proc is not None:
+            try:
+                self._instr_proc.terminate()
+            except Exception:
+                pass
+            self._instr_proc = None
+        # Belt-and-suspenders: kill the on-device process so a hung
+        # instrumentation doesn't leak a UiAutomation registration.
+        try:
+            self._client.shell_text(
+                f"am force-stop {self.LISTENER_PACKAGE}", check=False, timeout=5.0,
+            )
+        except Exception:
+            pass
 
     # -----------------------------
     # queue ops
@@ -199,87 +244,123 @@ class A11yEventListener:
             delta_measured=delta_measured,
         )
 
+    def content_seq(self) -> int:
+        """현재까지 누적된 content/scroll/state-change 이벤트 카운터."""
+        with self._seq_lock:
+            return self._content_seq
+
+    def wait_for_content_quiet(
+        self,
+        *,
+        poll_ms: int,
+        required_quiet_polls: int,
+        timeout_sec: float,
+    ) -> dict:
+        """
+        a11y CONTENT_EVENT_TYPES 이벤트가 연속해서 `required_quiet_polls`회의
+        polling 동안 도착하지 않을 때까지 대기. 실효 quiet window는
+        대략 `poll_ms × required_quiet_polls` 밀리초.
+
+        로딩 스피너·애니메이션이 계속 돌면 timeout_sec까지 기다린 뒤 강제 종료
+        ('reason': 'timeout'). 화면이 이미 정지된 상태면 거의 즉시 'quiet' 반환.
+
+        큐는 건드리지 않고 카운터만 폴링하므로 다른 컨슈머와 안전하게 공존.
+
+        Returns: {'reason': 'quiet'|'timeout', 'elapsed_ms': float, 'events': int}
+        """
+        poll_sec = max(0.01, poll_ms / 1000.0)
+        required = max(1, int(required_quiet_polls))
+
+        start = time.monotonic()
+        deadline = start + max(0.0, float(timeout_sec))
+        initial_seq = self.content_seq()
+        last_seq = initial_seq
+        consecutive_quiet = 0
+
+        while True:
+            cur_seq = self.content_seq()
+            if cur_seq != last_seq:
+                consecutive_quiet = 0
+                last_seq = cur_seq
+            else:
+                consecutive_quiet += 1
+
+            now = time.monotonic()
+            if consecutive_quiet >= required:
+                return {
+                    "reason": "quiet",
+                    "elapsed_ms": (now - start) * 1000.0,
+                    "events": cur_seq - initial_seq,
+                }
+
+            if now >= deadline:
+                return {
+                    "reason": "timeout",
+                    "elapsed_ms": (now - start) * 1000.0,
+                    "events": cur_seq - initial_seq,
+                }
+
+            time.sleep(poll_sec)
+
     # -----------------------------
     # availability check
     # -----------------------------
 
     def verify_available(self) -> None:
         """
-        device_listener APK가 설치돼 있고 접근성 서비스가 활성·응답 가능한지 검증.
-        세 단계 모두 통과해야 None 반환, 아니면 A11yServiceUnavailable 발생.
+        instrumentation 이 정상적으로 떠서 SERVICE_CONNECTED 를 emit 했는지 검증.
+        실패 시 A11yServiceUnavailable.
         """
-        if not self._is_package_installed():
+        for pkg in (self.LISTENER_PACKAGE, self.TEST_PACKAGE):
+            if not self._is_package_installed(pkg):
+                raise A11yServiceUnavailable(
+                    f"device_listener APK 가 단말에 설치돼 있지 않음 ({pkg}). "
+                    f"빌드 후 두 APK 를 모두 install 하세요:\n"
+                    f"  adb install -r device_listener/app/build/outputs/apk/debug/app-debug.apk\n"
+                    f"  adb install -r device_listener/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+                )
+
+        # start() 가 이미 `am instrument` 를 띄웠으니, 여기서는 SERVICE_CONNECTED
+        # 가 logcat 으로 흘러오기만 기다리면 된다. cold start 는 dex 변환 때문에
+        # 수 초 걸릴 수 있어 VERIFY_PROBE_TIMEOUT_SEC 을 넉넉히 잡음.
+        connected = self.wait_for(
+            type_filter=("SERVICE_CONNECTED",),
+            timeout_sec=self.VERIFY_PROBE_TIMEOUT_SEC,
+        )
+        if connected is None:
             raise A11yServiceUnavailable(
-                f"device_listener APK가 단말에 설치돼 있지 않음 "
-                f"({self.LISTENER_PACKAGE}). "
-                f"`device_listener/` 빌드 후 `adb install -r`로 설치하세요."
+                f"instrumentation 이 {self.VERIFY_PROBE_TIMEOUT_SEC}s 내 "
+                "SERVICE_CONNECTED 를 emit 하지 않음. "
+                "`am instrument` 가 즉시 죽었거나 (\"UiAutomationService already "
+                "registered\" 등), test APK 가 잘못된 서명일 수 있음. "
+                "디바이스 재부팅 후 재시도하거나, `adb shell am instrument ...` 를 "
+                "직접 실행해 stdout 을 확인하세요."
             )
 
-        if not self._is_a11y_enabled():
-            raise A11yServiceUnavailable(
-                "접근성 서비스가 활성화돼 있지 않음. "
-                "단말: 설정 → 접근성 → IPG Listener → 사용. "
-                f"(컴포넌트: {self.A11Y_COMPONENT})"
-            )
-
+        # 추가로 trigger 경로가 동작하는지 한 번 probe
         evt = self.request_dump_and_wait(timeout_sec=self.VERIFY_PROBE_TIMEOUT_SEC)
         if evt is None or not evt.xml_path:
             raise A11yServiceUnavailable(
-                f"DUMP_NOW broadcast에 {self.VERIFY_PROBE_TIMEOUT_SEC}s 내 "
-                "응답 없음. APK 설치·접근성 ON 상태지만 서비스가 살아있지 "
-                "않거나 logcat 권한 문제일 수 있음."
+                f"SERVICE_CONNECTED 은 받았지만 trigger-file 응답이 "
+                f"{self.VERIFY_PROBE_TIMEOUT_SEC}s 내 안 옴. "
+                "instrumentation 의 trigger poll loop 가 멈춘 듯."
             )
 
         if self._logger:
             self._logger.info(
-                f"[A11Y] verified: pkg={self.LISTENER_PACKAGE}, "
-                f"probe_xml={evt.xml_path}"
+                f"[A11Y] verified: instrumentation up, probe_xml={evt.xml_path}"
             )
 
-    def _is_package_installed(self) -> bool:
+    def _is_package_installed(self, pkg: str) -> bool:
         try:
             out = self._client.shell_text(
-                f"pm path {self.LISTENER_PACKAGE}",
+                f"pm path {pkg}",
                 check=False,
                 timeout=5.0,
             ).strip()
         except Exception:
             return False
         return out.startswith("package:")
-
-    def _is_a11y_enabled(self) -> bool:
-        try:
-            enabled = self._client.shell_text(
-                "settings get secure accessibility_enabled",
-                check=False,
-                timeout=5.0,
-            ).strip()
-            if enabled != "1":
-                return False
-
-            services = self._client.shell_text(
-                "settings get secure enabled_accessibility_services",
-                check=False,
-                timeout=5.0,
-            ).strip()
-        except Exception:
-            return False
-
-        if not services or services.lower() == "null":
-            return False
-
-        for entry in services.split(":"):
-            if self._matches_component(entry.strip()):
-                return True
-        return False
-
-    def _matches_component(self, entry: str) -> bool:
-        if not entry:
-            return False
-        # 정규형 `pkg/.Class` 와 `pkg/pkg.Class` 모두 매칭
-        return entry == self.A11Y_COMPONENT or entry.startswith(
-            f"{self.LISTENER_PACKAGE}/"
-        )
 
     # -----------------------------
     # request-response helper
@@ -289,22 +370,23 @@ class A11yEventListener:
         self,
         *,
         timeout_sec: float = 5.0,
-        pkg: Optional[str] = None,
+        pkg: Optional[str] = None,  # kept for API compat; not used by instrumentation
     ) -> Optional[A11yEvent]:
         """
-        DUMP_NOW broadcast 전송 후 다음 DUMP_WRITTEN 수신.
-        broadcast 직전 queue를 clear하므로 stale event 매칭은 없다.
+        Sentinel 파일을 touch 해서 instrumentation 의 polling loop 를 깨운다.
+        다음 DUMP_WRITTEN(또는 MANUAL_DUMP) 까지 기다린 뒤 반환.
+        queue 는 호출 직전에 clear 되므로 stale event 매칭은 없다.
         """
+        del pkg  # unused
         self.clear()
 
-        cmd = f"am broadcast -a {self.BROADCAST_ACTION}"
-        if pkg is not None:
-            cmd += f" --es pkg {pkg}"
         try:
-            self._client.shell_text(cmd, check=False, timeout=5.0)
+            self._client.shell_text(
+                f"touch {self.TRIGGER_FILE}", check=False, timeout=5.0,
+            )
         except Exception as e:
             if self._logger:
-                self._logger.warning(f"[A11Y] broadcast failed: {e}")
+                self._logger.warning(f"[A11Y] trigger touch failed: {e}")
             return None
 
         return self.wait_for(
@@ -354,6 +436,10 @@ class A11yEventListener:
                     cls,
                     target_package=self._target_package,
                 )
+
+            if evt.type in self.CONTENT_EVENT_TYPES:
+                with self._seq_lock:
+                    self._content_seq += 1
 
             self._log_event(evt)
 
