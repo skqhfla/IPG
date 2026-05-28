@@ -2,7 +2,6 @@ package dev.ipg.listener
 
 import android.content.Intent
 import android.os.Bundle
-import android.provider.Settings
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -13,7 +12,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var status: TextView
     private lateinit var filterStatus: TextView
-    private lateinit var btnSettings: Button
     private lateinit var btnFilter: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -22,12 +20,8 @@ class MainActivity : AppCompatActivity() {
 
         status = findViewById(R.id.status)
         filterStatus = findViewById(R.id.filterStatus)
-        btnSettings = findViewById(R.id.btnSettings)
         btnFilter = findViewById(R.id.btnFilter)
 
-        btnSettings.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        }
         btnFilter.setOnClickListener {
             startActivity(Intent(this, ConfigActivity::class.java))
         }
@@ -35,20 +29,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        status.setText(
-            if (isServiceEnabled()) R.string.status_enabled
-            else R.string.status_disabled
-        )
+        status.setText(R.string.status_text)
         filterStatus.text = renderFilterStatus()
-    }
-
-    private fun isServiceEnabled(): Boolean {
-        val enabled = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-        val expected = "$packageName/${IpgAccessibilityService::class.java.name}"
-        return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
     }
 
     private fun renderFilterStatus(): String {

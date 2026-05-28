@@ -21,32 +21,28 @@
 
 ## 2. device_listener APK 사전 준비 (필수)
 
-`src_apk/`는 실행 직후 [A11yEventListener.verify_available()](src_apk/core/adb/a11y_event_listener.py)로 세 가지를 점검합니다. 하나라도 통과 못 하면 `A11yServiceUnavailable` 발생 → **exit code 2로 ABORT**.
+[device_listener](../device_listener/) 는 **instrumented test** 로 동작합니다. AccessibilityService 가 아니라 `am instrument -w` 로 띄우는 `UiAutomation` 기반 — 사용자 토글 없이, Samsung Knox 같은 OEM 정책에도 막히지 않고 즉시 동작.
 
-1. `dev.ipg.listener` 패키지가 설치되어 있는가
-2. `settings get secure accessibility_enabled = 1` 이고 `enabled_accessibility_services`에 `dev.ipg.listener/.IpgAccessibilityService`가 포함돼 있는가
-3. `am broadcast -a dev.ipg.listener.DUMP_NOW` 에 5초 내 `DUMP_WRITTEN` 응답이 오는가
+`src_apk/`는 실행 직후 [A11yEventListener.start()](src_apk/core/adb/a11y_event_listener.py) 가 자동으로 instrumentation 을 띄우고 [verify_available()](src_apk/core/adb/a11y_event_listener.py) 로 검증합니다. 실패하면 `A11yServiceUnavailable` → **exit code 2로 ABORT**.
 
-### 2.1 설치 / 활성화
+검증 단계:
+1. `dev.ipg.listener` (main APK) + `dev.ipg.listener.test` (instrumented test APK) 둘 다 설치돼 있는가
+2. `am instrument` 가 띄운 instrumentation 이 15초 안에 `SERVICE_CONNECTED` 를 logcat 으로 emit 했는가
+3. trigger-file (`dump_now.trigger`) probe 가 정상 동작해 `DUMP_WRITTEN` 응답이 오는가
+
+### 2.1 설치 (활성화 단계 없음)
 
 ```bash
 # 빌드 (Windows: gradlew.bat, *nix: ./gradlew)
 cd device_listener
-./gradlew :app:assembleDebug
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
 
-# 설치
+# 두 APK 모두 설치
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-
-# 접근성 활성화
-adb shell settings put secure enabled_accessibility_services \
-    dev.ipg.listener/dev.ipg.listener.IpgAccessibilityService
-adb shell settings put secure accessibility_enabled 1
-
-# 확인
-adb shell dumpsys accessibility | grep "enabled services"
+adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 ```
 
-> `adb install -r`은 a11y 서비스를 자동 재바인딩하지 않습니다. 재설치 후 첫 실행에서 verify가 실패하면 위의 두 `settings put` 명령을 다시 실행하거나, 폰에서 IPG Listener 앱 열어 ENABLED 상태인지 확인하세요.
+> **이전 AccessibilityService 활성화 단계 (Settings 토글, `settings put secure enabled_accessibility_services ...`) 는 더 이상 필요 없음.** 설치만 하면 끝. `src_apk` 실행 시 `am instrument` 가 자동으로 띄움.
 
 ### 2.2 캡처 대상 필터 (선택)
 
@@ -77,6 +73,7 @@ python src_apk/main.py --app Hejhome
 | `--debug` | off | 디버그 로그 활성화 |
 | `--node-loop-repetition <n>` | `3` | 노드 루프 감지 반복 임계값 |
 | `--setup` | off | **Setup 모드** 진입 (§5 참조) |
+| `--rerun <path>` | off | **재실행 모드** — 이전 run dir의 memory를 로드해 미트리거 이벤트만 수행 (§5.5 참조) |
 
 ---
 
@@ -132,6 +129,23 @@ exceptions/
 
 ---
 
+## 5.5 재실행 모드 — 이전 run의 미트리거 이벤트만 수행
+
+이미 한 번 돌린 run의 결과를 이어받아, 그 run에서 **트리거되지 않은(미실행)** 이벤트만 추가로 수행하고 싶을 때 사용합니다. 시간이 부족해 끊긴 탐색을 이어가거나, 첫 run의 커버리지를 보강할 때 유용합니다.
+
+```bash
+python src_apk/main.py --app Hejhome \
+  --rerun outputs_APK/Hejhome/20260526_120000
+```
+
+동작:
+- `--rerun PATH/json/` 에서 `app_memory.json` / `screen_memory.json` / `packet_memory.json` 을 로드 (UTG가 필요하면 `--utg` 와 함께 사용하면 `PATH/utg/utg.json` 도 로드).
+- 로드된 메모리에는 각 element 별 `executed_events`, `swipe_directions_tried/exhausted` 가 그대로 들어 있으므로, Traversal Policy 가 자연스럽게 이미 트리거된 이벤트를 건너뛰고 **남은 미트리거 이벤트만** 후보로 골라 수행합니다.
+- 출력은 평소처럼 새 timestamp 디렉터리 (`outputs_APK/<app>/<new_timestamp>/`) 에 기록 — 원본 PATH 는 절대 변경하지 않습니다.
+- 미트리거 이벤트가 더 이상 없으면 `terminal_reason = no_more_actionable_events` 로 정상 종료.
+
+---
+
 ## 6. 출력 구조
 
 ```
@@ -147,7 +161,7 @@ outputs_APK/
         ├── json/
         │   ├── app_memory.json      # 화면 / 요소 인벤토리
         │   ├── screen_memory.json   # 화면 전이 기록
-        │   └── packet_memory.json   # 패킷 이벤트
+        │   └── packet_memory.json   # 패킷 이벤트 (screen_id × snapshot_id × event_key)
         ├── utg/                     # --utg 사용 시
         │   ├── utg.json
         │   └── utg.png
@@ -180,6 +194,10 @@ python src_apk/main.py --app Tapo --serial R5CX12345678
 # 제외 화면 등록 후 자동 회피 실행
 python src_apk/main.py --app Hejhome --setup                  # 화면 등록
 python src_apk/main.py --app Hejhome --utg --runtime 1800     # 실제 탐색
+
+# 이전 run을 이어받아 미트리거 이벤트만 추가 수행 (재실행 모드)
+python src_apk/main.py --app Hejhome \
+    --rerun outputs_APK/Hejhome/20260526_120000 --utg
 ```
 
 ---
@@ -188,9 +206,9 @@ python src_apk/main.py --app Hejhome --utg --runtime 1800     # 실제 탐색
 
 | 증상 | 원인 / 조치 |
 |---|---|
-| `[A11Y] device_listener APK가 단말에 설치돼 있지 않음` | §2.1 설치 단계 다시 |
-| `[A11Y] 접근성 서비스가 활성화돼 있지 않음` | `adb shell settings put secure enabled_accessibility_services ...` 재실행 또는 폰 설정에서 토글 |
-| `[A11Y] DUMP_NOW broadcast에 5.0s 내 응답 없음` | 폰에서 IPG Listener 앱 열어 ENABLED 확인. `adb install -r` 직후 자주 발생 — 활성화 명령 재실행 |
+| `[A11Y] device_listener APK 가 단말에 설치돼 있지 않음` | §2.1 설치 단계 다시. main APK + test APK 둘 다 필요 |
+| `[A11Y] instrumentation 이 ... SERVICE_CONNECTED 를 emit 하지 않음` | system_server 에 stale UiAutomation 등록이 남음 — `adb reboot` 가 가장 확실. 또는 `adb shell am instrument -w -m -e class dev.ipg.listener.IpgInstrumentationTest#run dev.ipg.listener.test/androidx.test.runner.AndroidJUnitRunner` 를 직접 띄워 stdout 의 에러 확인 |
+| `[A11Y] trigger-file 응답이 ... 안 옴` | instrumentation 의 polling thread 가 stuck. `adb shell am force-stop dev.ipg.listener` 후 재시도 |
 | `xml_path` 가 device-side 경로라 push 못 받을 때 | `outputs_APK/<app>/<session>/xml/<seq>.xml`에 a11y XML이 떨어졌는지 확인 (APK 설정에 따름) |
 
 ---

@@ -1,130 +1,150 @@
 package dev.ipg.listener
 
-import android.accessibilityservice.AccessibilityService
-import android.content.BroadcastReceiver
+import android.app.UiAutomation
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Build
 import android.util.Log
-import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.annotation.RequiresApi
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.UiDevice
 import org.json.JSONObject
+import org.junit.Test
+import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Executor
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
-class IpgAccessibilityService : AccessibilityService() {
+/**
+ * Maestro-style listener.
+ *
+ * Runs as an instrumented test under `am instrument -w` — the test process gets
+ * shell-level UiAutomation access, bypassing the AccessibilityService binding
+ * path (which Samsung Knox refuses for sideloaded APKs).
+ *
+ * The host launches us with:
+ *   adb shell am instrument -w -m \
+ *     -e class dev.ipg.listener.IpgInstrumentationTest#run \
+ *     dev.ipg.listener.test/androidx.test.runner.AndroidJUnitRunner
+ *
+ * Output identical to the old AccessibilityService:
+ *   - logcat tag IPG_EVT, one JSON per line
+ *   - XML/JSON/PNG dumps under the same paths consumed by dump_collector.py
+ */
+@RunWith(AndroidJUnit4::class)
+class IpgInstrumentationTest {
 
-    private val lastContentChanged = HashMap<String, Long>()
-    private val seqCounter = AtomicInteger(0)
-    private lateinit var sessionId: String
-    private lateinit var captureBaseDir: File
-    private lateinit var configFile: File
-    private val screenshotExecutor: Executor by lazy { Executors.newSingleThreadExecutor() }
+    @Test
+    fun run() {
+        val instr = InstrumentationRegistry.getInstrumentation()
+        val ctx: Context = instr.targetContext
+        // Bootstrap UiDevice first — its constructor wires up UiAutomation in a way
+        // that subsequent `instr.uiAutomation` reads return the same instance,
+        // matching Maestro's pattern. Avoids "UiAutomationService already registered".
+        UiDevice.getInstance(instr)
+        val ui: UiAutomation = instr.uiAutomation
 
-    private var configMtime = 0L
-    private var configPackages: Set<String>? = null
-    private var configAppLabel: String? = null
+        val handler = EventHandler(ctx, ui)
+        handler.emitConnected()
 
-    // 마지막 WINDOW_STATE_CHANGED의 className(=현재 activity/window 클래스).
-    // hierarchy dump 시 <hierarchy activity="..."> 로 기록해 화면 식별에 사용.
-    @Volatile private var lastWindowClass: String = ""
-
-    private val dumpReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val ts = System.currentTimeMillis()
-            val triggerJson = JSONObject().apply {
-                put("ts", ts)
-                put("type", "MANUAL_DUMP")
-                put("pkg", intent.getStringExtra("pkg") ?: "<broadcast>")
-            }
-            emit(triggerJson)
-            // Bypass package filter for manual dumps — caller explicitly asked.
+        ui.setOnAccessibilityEventListener { event ->
             try {
-                dumpHierarchy(ts, "MANUAL_DUMP", triggerJson)
+                handler.handle(event)
             } catch (t: Throwable) {
-                Log.w(TAG, "manual dump failed: ${t.message}")
+                Log.w(TAG, "handler error: ${t.message}")
+            }
+        }
+
+        // The old AccessibilityService had a BroadcastReceiver for DUMP_NOW.
+        // Instrumented tests can't register exported receivers reliably; instead
+        // we poll a sentinel file the host can `touch` to request an on-demand dump.
+        val triggerFile = handler.triggerFile()
+        while (!Thread.currentThread().isInterrupted) {
+            try {
+                if (triggerFile.exists()) {
+                    try { triggerFile.delete() } catch (_: Throwable) {}
+                    try {
+                        handler.manualDump()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "manual dump failed: ${t.message}")
+                    }
+                }
+                Thread.sleep(TRIGGER_POLL_MS)
+            } catch (_: InterruptedException) {
+                break
             }
         }
     }
 
-    override fun onServiceConnected() {
-        sessionId = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        captureBaseDir = getExternalFilesDir(null) ?: filesDir
-        configFile = File(captureBaseDir, "config.json")
+    companion object {
+        private const val TAG = "IPG_EVT"
+        private const val TRIGGER_POLL_MS = 100L
+    }
+}
 
+private class EventHandler(private val ctx: Context, private val ui: UiAutomation) {
+
+    private val sessionId: String =
+        SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    private val captureBaseDir: File = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+    private val configFile: File = File(captureBaseDir, "config.json")
+    private val seqCounter = AtomicInteger(0)
+    private val lastContentChanged = HashMap<String, Long>()
+
+    @Volatile private var lastWindowClass: String = ""
+    private var configMtime = 0L
+    private var configPackages: Set<String>? = null
+    private var configAppLabel: String? = null
+
+    fun emitConnected() {
         maybeReloadConfig()
-        registerDumpReceiver()
-
         emit(JSONObject().apply {
             put("ts", System.currentTimeMillis())
             put("type", "SERVICE_CONNECTED")
             put("session", sessionId)
             put("apiLevel", Build.VERSION.SDK_INT)
-            put("screenshotMode", screenshotMode())
+            put("screenshotMode", "uiautomation")
             put("configFile", configFile.absolutePath)
+            put("triggerFile", triggerFile().absolutePath)
             put("appLabel", configAppLabel ?: JSONObject.NULL)
             val pkgs = configPackages
-            if (pkgs != null) {
-                put("packagesFilter", org.json.JSONArray(pkgs.toList()))
-            }
+            if (pkgs != null) put("packagesFilter", org.json.JSONArray(pkgs.toList()))
         })
     }
 
-    override fun onInterrupt() {
-        emit(JSONObject().apply {
-            put("ts", System.currentTimeMillis())
-            put("type", "SERVICE_INTERRUPTED")
-        })
-    }
+    fun triggerFile(): File = File(captureBaseDir, "dump_now.trigger")
 
-    override fun onUnbind(intent: Intent?): Boolean {
-        try { unregisterReceiver(dumpReceiver) } catch (_: Throwable) {}
-        return super.onUnbind(intent)
-    }
-
-    private fun registerDumpReceiver() {
-        val filter = IntentFilter(ACTION_DUMP_NOW)
-        // API 33+ requires explicit export flag for runtime-registered receivers.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(dumpReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(dumpReceiver, filter)
+    /** Snapshot the current screen regardless of any event filter / debounce.
+     *  Bypasses package filter — the host explicitly asked for it. */
+    fun manualDump() {
+        val ts = System.currentTimeMillis()
+        val triggerJson = JSONObject().apply {
+            put("ts", ts)
+            put("type", "MANUAL_DUMP")
+            put("pkg", "<trigger>")
         }
+        emit(triggerJson)
+        dumpHierarchy(ts, "MANUAL_DUMP", triggerJson)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        try {
-            handle(event)
-        } catch (t: Throwable) {
-            Log.w(TAG, "handler error: ${t.message}")
-        }
-    }
-
-    private fun handle(event: AccessibilityEvent) {
+    fun handle(event: AccessibilityEvent) {
         maybeReloadConfig()
 
         val type = event.eventType
-        val pkg = event.packageName?.toString() ?: ""
+        val pkg = event.packageName?.toString().orEmpty()
 
         val filter = configPackages
         if (filter != null && filter.isNotEmpty() && pkg !in filter) return
 
         val cls = event.className?.toString().orEmpty()
 
-        // 현재 화면의 activity/window 클래스 추적 (hierarchy dump에 기록).
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && cls.isNotEmpty()) {
             lastWindowClass = cls
         }
@@ -157,7 +177,6 @@ class IpgAccessibilityService : AccessibilityService() {
                     val flags = contentChangeFlags(event.contentChangeTypes)
                     if (flags.isNotEmpty()) put("change", flags)
                 }
-
                 AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                     put("scrollX", event.scrollX)
                     put("scrollY", event.scrollY)
@@ -171,10 +190,8 @@ class IpgAccessibilityService : AccessibilityService() {
                         put("maxScrollY", event.maxScrollY)
                     }
                 }
-
                 AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
-                    val isToast = cls.contains("android.widget.Toast")
-                    put("isToast", isToast)
+                    put("isToast", cls.contains("android.widget.Toast"))
                 }
             }
 
@@ -286,7 +303,6 @@ class IpgAccessibilityService : AccessibilityService() {
 
         val seq = seqCounter.incrementAndGet()
         val paths = resolveOutputs(seq, ts, typeName)
-        val mode = screenshotMode()
 
         try {
             paths.xml.writeText(xml, Charsets.UTF_8)
@@ -307,66 +323,47 @@ class IpgAccessibilityService : AccessibilityService() {
                 put("trigger", typeName)
                 put("xml", paths.xml.absolutePath)
                 put("meta", paths.json.absolutePath)
-                put("screenshotMode", mode)
+                put("screenshotMode", "uiautomation")
                 put("outputMode", paths.mode)
                 if (paths.appLabel != null) put("appLabel", paths.appLabel)
-                if (mode == "apk") put("screenshot", paths.screenshot.absolutePath)
-                else put("screenshotTarget", paths.screenshot.absolutePath)
+                put("screenshot", paths.screenshot.absolutePath)
             })
 
-            if (mode == "apk") {
-                captureScreenshotApi30(seq, paths.screenshot)
-            }
+            captureScreenshot(seq, paths.screenshot)
         } catch (t: Throwable) {
             Log.w(TAG, "dump write failed: ${t.message}")
         }
     }
 
-    private fun screenshotMode(): String =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "apk" else "host"
-
-    @RequiresApi(Build.VERSION_CODES.R)
-    private fun captureScreenshotApi30(seq: Int, pngFile: File) {
-        try {
-            takeScreenshot(
-                Display.DEFAULT_DISPLAY,
-                screenshotExecutor,
-                object : TakeScreenshotCallback {
-                    override fun onSuccess(result: ScreenshotResult) {
-                        try {
-                            val hwBuffer = result.hardwareBuffer
-                            val raw = Bitmap.wrapHardwareBuffer(hwBuffer, result.colorSpace)
-                                ?: throw IllegalStateException("wrapHardwareBuffer returned null")
-                            val safe = raw.copy(Bitmap.Config.ARGB_8888, false)
-                            raw.recycle()
-                            pngFile.parentFile?.mkdirs()
-                            FileOutputStream(pngFile).use { out ->
-                                safe.compress(Bitmap.CompressFormat.PNG, 100, out)
-                            }
-                            safe.recycle()
-                            hwBuffer.close()
-                            emit(JSONObject().apply {
-                                put("ts", System.currentTimeMillis())
-                                put("type", "DUMP_SCREENSHOT")
-                                put("session", sessionId)
-                                put("seq", seq)
-                                put("path", pngFile.absolutePath)
-                            })
-                        } catch (t: Throwable) {
-                            Log.w(TAG, "screenshot save failed (seq=$seq): ${t.message}")
-                            emitScreenshotFailure(seq, "save: ${t.message}")
-                        }
-                    }
-
-                    override fun onFailure(errorCode: Int) {
-                        Log.w(TAG, "screenshot failed (seq=$seq): code=$errorCode")
-                        emitScreenshotFailure(seq, "code=$errorCode")
-                    }
-                }
-            )
+    private fun captureScreenshot(seq: Int, pngFile: File) {
+        val bmp: Bitmap? = try {
+            ui.takeScreenshot()
         } catch (t: Throwable) {
-            Log.w(TAG, "screenshot dispatch failed (seq=$seq): ${t.message}")
+            Log.w(TAG, "takeScreenshot dispatch failed (seq=$seq): ${t.message}")
             emitScreenshotFailure(seq, "dispatch: ${t.message}")
+            return
+        }
+        if (bmp == null) {
+            emitScreenshotFailure(seq, "uiautomation returned null bitmap")
+            return
+        }
+        try {
+            pngFile.parentFile?.mkdirs()
+            FileOutputStream(pngFile).use { out ->
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+            emit(JSONObject().apply {
+                put("ts", System.currentTimeMillis())
+                put("type", "DUMP_SCREENSHOT")
+                put("session", sessionId)
+                put("seq", seq)
+                put("path", pngFile.absolutePath)
+            })
+        } catch (t: Throwable) {
+            Log.w(TAG, "screenshot save failed (seq=$seq): ${t.message}")
+            emitScreenshotFailure(seq, "save: ${t.message}")
+        } finally {
+            try { bmp.recycle() } catch (_: Throwable) {}
         }
     }
 
@@ -381,18 +378,16 @@ class IpgAccessibilityService : AccessibilityService() {
     }
 
     private fun buildHierarchyXml(): String? {
-        val root = rootInActiveWindow ?: return null
+        val root = ui.rootInActiveWindow ?: return null
         val rotation = try {
-            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             @Suppress("DEPRECATION")
             wm.defaultDisplay.rotation
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             0
         }
         val sb = StringBuilder(8192)
         sb.append("<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n")
-        // window-id: 같은 window면 같은 화면 표면(스크롤·로딩·탭 전환에 불변).
-        // activity: 마지막 WINDOW_STATE_CHANGED 클래스. 둘 다 화면 식별에 사용.
         sb.append("<hierarchy")
         attr(sb, "rotation", rotation.toString())
         attr(sb, "window-id", root.windowId.toString())
@@ -467,7 +462,7 @@ class IpgAccessibilityService : AccessibilityService() {
                 else -> {
                     val code = c.code
                     if (code < 0x20 && c != '\n' && c != '\t' && c != '\r') {
-                        // skip control chars that would break XML
+                        // skip XML-illegal control chars
                     } else {
                         out.append(c)
                     }
@@ -511,6 +506,5 @@ class IpgAccessibilityService : AccessibilityService() {
         private const val TAG = "IPG_EVT"
         private const val CONTENT_DEBOUNCE_MS = 300L
         private const val TEXT_MAX = 500
-        const val ACTION_DUMP_NOW = "dev.ipg.listener.DUMP_NOW"
     }
 }

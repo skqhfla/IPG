@@ -1,23 +1,34 @@
 """
 Tail logcat for IPG_EVT DUMP_* lines and pull each XML/JSON/PNG to host.
 
-Two output modes mirroring the APK:
+Listener is started as an instrumented test (Maestro-style) via:
+  am instrument -w -m \
+    -e class dev.ipg.listener.IpgInstrumentationTest#run \
+    dev.ipg.listener.test/androidx.test.runner.AndroidJUnitRunner
+
+This bypasses the AccessibilityService binding path entirely — no user toggle,
+no Knox interference. The instrumentation process emits the same IPG_EVT
+logcat stream + dump files this collector was already consuming.
+
+Two output modes mirroring the listener:
   - "ipg":   <out_root>/<appLabel>/<session>/{xml,screen,json}/<seq>.{xml,png,json}
             Default out_root = repo_root/outputs_APK
   - "flat":  <out_root>/<session>/<basename>.{xml,json,png}
             Default out_root = device_listener/captures
 
-On Ctrl+C the collector runs build_utg.py against every IPG-mode session it
-touched, producing <session>/screen/utg.json for the Monitor webapp.
+On Ctrl+C the collector kills the instrumentation, then runs build_utg.py
+against every IPG-mode session it touched.
 
 Usage:
     python device_listener/host/dump_collector.py [options]
 
 Options:
     --keep                Don't delete files from device after pulling.
-    --no-screenshots      Skip screenshot capture / pull.
+    --no-screenshots      (kept for compatibility; PNG always captured now)
     --no-utg              Skip auto UTG build at shutdown.
     --include-backlog     Process events already in the logcat ring buffer.
+    --no-instrument       Assume the listener is already running; don't start
+                          our own `am instrument` session.
     --ipg-out DIR         Override IPG-mode root (default: repo/outputs_APK).
     --flat-out DIR        Override flat-mode root (default: device_listener/captures).
 """
@@ -29,14 +40,20 @@ import json
 import pathlib
 import subprocess
 import sys
+import threading
+import time
 
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_IPG_OUT = REPO_ROOT / "outputs_APK"
 DEFAULT_FLAT_OUT = SCRIPT_DIR.parent / "captures"
-HOST_SCREENCAP_REMOTE = "/sdcard/_ipg_screencap.png"
 BUILD_UTG_SCRIPT = SCRIPT_DIR / "build_utg.py"
+
+INSTRUMENTATION_TARGET = (
+    "dev.ipg.listener.test/androidx.test.runner.AndroidJUnitRunner"
+)
+INSTRUMENTATION_CLASS = "dev.ipg.listener.IpgInstrumentationTest#run"
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,11 +63,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--keep", action="store_true",
                    help="Keep files on the device after pulling (default: delete).")
     p.add_argument("--no-screenshots", action="store_true",
-                   help="Skip screenshot capture and pull entirely.")
+                   help="(kept for compatibility — screenshots are always taken now).")
     p.add_argument("--no-utg", action="store_true",
                    help="Skip auto UTG build at shutdown.")
     p.add_argument("--include-backlog", action="store_true",
                    help="Process events already in the logcat ring buffer (default: only new).")
+    p.add_argument("--no-instrument", action="store_true",
+                   help="Don't start `am instrument` — assume listener is already running.")
     return p.parse_args()
 
 
@@ -73,15 +92,61 @@ def adb_rm(remote: str) -> None:
     subprocess.run(["adb", "shell", "rm", "-f", remote], capture_output=True)
 
 
-def adb_screencap(remote: str) -> bool:
-    r = subprocess.run(
-        ["adb", "shell", "screencap", "-p", remote],
-        capture_output=True, text=True,
+def start_instrumentation() -> subprocess.Popen:
+    """Launch the listener via `am instrument` (Maestro-style).
+
+    The `am instrument -w` call blocks until the test method returns; our
+    test loops forever, so this Popen will sit running until we kill it.
+    """
+    cmd = [
+        "adb", "shell",
+        "am", "instrument", "-w", "-m",
+        "-e", "class", INSTRUMENTATION_CLASS,
+        INSTRUMENTATION_TARGET,
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
     )
-    if r.returncode != 0:
-        sys.stderr.write(f"[!] screencap failed :: {r.stderr.strip()}\n")
-        return False
-    return True
+
+    # Drain stdout in a background thread so the pipe doesn't fill up. The
+    # instrumentation runner prints status lines (e.g. INSTRUMENTATION_STATUS)
+    # we forward verbatim — useful when the test refuses to start.
+    def _drain():
+        if proc.stdout is None:
+            return
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            sys.stderr.write(f"[instrument] {line}\n")
+
+    threading.Thread(target=_drain, name="instrument-stdout", daemon=True).start()
+    return proc
+
+
+def stop_instrumentation(proc: subprocess.Popen | None) -> None:
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        return  # already dead
+    try:
+        proc.terminate()
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except Exception:
+        pass
+    # Belt-and-suspenders: also kill the test process on the device, in case
+    # the `am instrument` parent disconnected without taking the child down.
+    subprocess.run(
+        ["adb", "shell", "am", "force-stop", "dev.ipg.listener"],
+        capture_output=True,
+    )
 
 
 def parse_event(line: str) -> dict | None:
@@ -118,7 +183,7 @@ def local_path_for(remote: str, session_dir: pathlib.Path, output_mode: str) -> 
 
 
 def handle_dump_written(evt: dict, args: argparse.Namespace,
-                        screenshots: bool, sessions_touched: set[pathlib.Path]) -> None:
+                        sessions_touched: set[pathlib.Path]) -> None:
     xml_remote = evt.get("xml")
     meta_remote = evt.get("meta")
     if not xml_remote or not meta_remote:
@@ -143,26 +208,9 @@ def handle_dump_written(evt: dict, args: argparse.Namespace,
     if output_mode == "ipg":
         sessions_touched.add(sess_dir)
 
-    suffix = ""
-    if screenshots and evt.get("screenshotMode") == "host":
-        # Compute the local PNG destination from the screenshotTarget the APK
-        # told us (so it matches the IPG screen/<seq>.png convention there too).
-        target = evt.get("screenshotTarget")
-        if target:
-            png_local = local_path_for(target, sess_dir, output_mode)
-        else:
-            xml_name = pathlib.PurePosixPath(xml_remote).name
-            png_name = xml_name[:-4] + ".png" if xml_name.endswith(".xml") else xml_name + ".png"
-            if output_mode == "ipg":
-                png_local = sess_dir / "screen" / png_name
-            else:
-                png_local = sess_dir / png_name
-        if adb_screencap(HOST_SCREENCAP_REMOTE):
-            if adb_pull(HOST_SCREENCAP_REMOTE, png_local):
-                suffix = " [+png]"
-            adb_rm(HOST_SCREENCAP_REMOTE)
-
-    print(f"[+] {sess_dir.name}/{xml_local.name}{suffix}", flush=True)
+    # Screenshot is always taken by UiAutomation now; it arrives as a separate
+    # DUMP_SCREENSHOT event handled below.
+    print(f"[+] {sess_dir.name}/{xml_local.name}", flush=True)
 
 
 def handle_dump_screenshot(evt: dict, args: argparse.Namespace,
@@ -212,8 +260,15 @@ def main() -> int:
     print(f"[dump_collector] ipg_out={args.ipg_out}", flush=True)
     print(f"[dump_collector] flat_out={args.flat_out}", flush=True)
     print(f"[dump_collector] device files will be {'kept' if args.keep else 'deleted'} after pull", flush=True)
-    print(f"[dump_collector] screenshots {'OFF' if args.no_screenshots else 'ON'}", flush=True)
     print(f"[dump_collector] auto-utg {'OFF' if args.no_utg else 'ON'} (runs on Ctrl+C)", flush=True)
+    print(f"[dump_collector] instrument {'OFF (assume already running)' if args.no_instrument else 'ON'}", flush=True)
+
+    instr_proc: subprocess.Popen | None = None
+    if not args.no_instrument:
+        instr_proc = start_instrumentation()
+        print(f"[dump_collector] launched: am instrument -w -m -e class {INSTRUMENTATION_CLASS} {INSTRUMENTATION_TARGET}", flush=True)
+        # Give Dexopt / class init a moment before we start tailing.
+        time.sleep(1.0)
 
     logcat_cmd = ["adb", "logcat", "-s", "IPG_EVT:I"]
     if not args.include_backlog:
@@ -229,7 +284,6 @@ def main() -> int:
     )
     assert proc.stdout is not None
 
-    screenshots = not args.no_screenshots
     sessions_touched: set[pathlib.Path] = set()
 
     try:
@@ -239,17 +293,22 @@ def main() -> int:
                 continue
             t = evt.get("type")
             if t == "DUMP_WRITTEN":
-                handle_dump_written(evt, args, screenshots, sessions_touched)
+                handle_dump_written(evt, args, sessions_touched)
             elif t == "DUMP_SCREENSHOT":
-                handle_dump_screenshot(evt, args, screenshots, sessions_touched)
+                handle_dump_screenshot(evt, args, True, sessions_touched)
             elif t == "DUMP_SCREENSHOT_FAILED":
                 seq = evt.get("seq")
                 reason = evt.get("reason")
                 print(f"[!] screenshot failed seq={seq} :: {reason}", flush=True)
+            elif t == "SERVICE_CONNECTED":
+                api = evt.get("apiLevel")
+                sess = evt.get("session")
+                print(f"[ok] listener up: session={sess} api={api}", flush=True)
     except KeyboardInterrupt:
         print("\n[dump_collector] interrupted", flush=True)
     finally:
         proc.terminate()
+        stop_instrumentation(instr_proc)
         if not args.no_utg:
             build_utg_for(sessions_touched)
 
