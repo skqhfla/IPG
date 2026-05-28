@@ -4,11 +4,13 @@ import SummaryTab from './SummaryTab.jsx';
 import ScreensTab from './ScreensTab.jsx';
 import LogsTab from './LogsTab.jsx';
 import GraphTab from './GraphTab.jsx';
+import PacketsTab from './PacketsTab.jsx';
 
 const TABS = [
   { key: 'summary', label: '요약' },
   { key: 'screens', label: '화면' },
   { key: 'graph',   label: '그래프' },
+  { key: 'packets', label: '패킷' },
   { key: 'logs',    label: '로그' },
 ];
 
@@ -38,6 +40,7 @@ export default function RunDashboard({ run }) {
         {tab === 'summary' && <SummaryTab run={run} />}
         {tab === 'screens' && <ScreensTab run={run} />}
         {tab === 'graph'   && <GraphTab   run={run} />}
+        {tab === 'packets' && <PacketsTab run={run} />}
         {tab === 'logs'    && <LogsTab    run={run} />}
       </div>
     </div>

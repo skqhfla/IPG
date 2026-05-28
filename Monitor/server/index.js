@@ -162,6 +162,12 @@ app.get('/api/run/screen-memory', (req, res) => {
   readJsonFile(path.join(dir, 'json', 'screen_memory.json'), res);
 });
 
+app.get('/api/run/packet-memory', (req, res) => {
+  const dir = req.query.dir;
+  if (!dir) return res.status(400).json({ error: 'dir 파라미터가 필요합니다' });
+  readJsonFile(path.join(dir, 'json', 'packet_memory.json'), res);
+});
+
 // log 필터: scroll/executor/a11y/warning/all. tail=마지막 N줄.
 app.get('/api/run/log', (req, res) => {
   const dir = req.query.dir;

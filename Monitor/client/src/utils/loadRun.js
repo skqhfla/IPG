@@ -5,6 +5,7 @@
 //   <runDir>/run_meta.json
 //   <runDir>/json/app_memory.json
 //   <runDir>/json/screen_memory.json   (선택)
+//   <runDir>/json/packet_memory.json   (선택)
 //   <runDir>/logs/runtime.log          (선택)
 //   <runDir>/screen/*.png              (blobMap에 이미 들어옴)
 
@@ -49,14 +50,18 @@ export async function loadRunFromTree(items, blobMap, dirName) {
   const screenMemoryNode = jsonDir?.children
     ? findChild(jsonDir.children, 'screen_memory.json')
     : null;
+  const packetMemoryNode = jsonDir?.children
+    ? findChild(jsonDir.children, 'packet_memory.json')
+    : null;
   const logNode = logsDir?.children
     ? findChild(logsDir.children, 'runtime.log')
     : null;
 
-  const [meta, appMemory, screenMemory, logText] = await Promise.all([
+  const [meta, appMemory, screenMemory, packetMemory, logText] = await Promise.all([
     readJson(metaNode),
     readJson(appMemoryNode),
     readJson(screenMemoryNode),
+    readJson(packetMemoryNode),
     readText(logNode),
   ]);
 
@@ -65,6 +70,7 @@ export async function loadRunFromTree(items, blobMap, dirName) {
     meta,
     appMemory,
     screenMemory,
+    packetMemory,
     logText: logText ?? '',
     blobMap: blobMap || {},
   };
