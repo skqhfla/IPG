@@ -81,4 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Setup mode: interactively register screens to exclude from traversal",
     )
 
+    parser.add_argument(
+        "--rerun",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Re-execution mode: load memory from a previous run dir "
+            "(e.g. outputs_APK/Hejhome/20260526_120000) and only attempt "
+            "events that were never triggered. Output goes to a new timestamp dir."
+        ),
+    )
+
     return parser

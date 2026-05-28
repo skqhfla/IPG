@@ -68,7 +68,7 @@ def make_default_settings() -> Settings:
             draw_detection=False,
         ),
         screen_id=ScreenIdConfig(
-            kind=ScreenIdKind.LAYOUT_BBOX,
+            kind=ScreenIdKind.LAYOUT_TREE,
             algorithm="greedy_iou_v1",
             threshold=0.84,
             match_threshold=0.6,
@@ -106,6 +106,17 @@ def main() -> None:
     settings = make_default_settings()
     settings = apply_cli_overrides(settings, args)
 
+    rerun_source: Path | None = None
+    if args.rerun:
+        rerun_source = Path(args.rerun)
+        if not (rerun_source / "json" / "app_memory.json").exists():
+            print(
+                f"[ABORT] --rerun: app_memory.json not found under "
+                f"{rerun_source / 'json'}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     paths = PathManager(
@@ -141,12 +152,17 @@ def main() -> None:
             sys.exit(2)
         return
 
+    if rerun_source is not None:
+        logger.info(
+            f"[RERUN] memory를 {rerun_source} 에서 로드해 미트리거 이벤트만 수행"
+        )
+
     runner = Runner(
         settings=settings,
         paths=paths,
         app_name=args.app,
         launcher_activity=None,
-        replay=False,
+        rerun_source=rerun_source,
         device_serial=args.serial,
         adb_path="adb",
         logger=logger,
