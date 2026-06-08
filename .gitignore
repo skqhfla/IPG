@@ -10,3 +10,14 @@ outputs_APK/
 
 # 임시 스크린샷
 .tmp_*.png
+
+# 런타임 산출물·로그·예외 덤프
+outputs/
+e2e_logs/
+exceptions/
+analysis/
+structure/
+
+# 개인 도구·외부 참조 코드
+.claude/
+relatedwork/
