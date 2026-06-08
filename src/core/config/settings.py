@@ -44,6 +44,11 @@ class TraversalConfig:
     same_screen_threshold: int
     timeout_sec: int
     interval_sec: int
+    node_loop_repetition: int
+    excluded_streak_threshold: int
+    stability_poll_interval_ms: int
+    stability_max_wait_sec: float
+    stability_required_matches: int
 
 
 @dataclass(slots=True)

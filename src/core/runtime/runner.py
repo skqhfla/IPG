@@ -15,6 +15,7 @@ from core.graph.utg import UTGGraphData
 from core.memory.app_memory import AppMemoryStore
 from core.memory.packet_memory import PacketMemoryStore
 from core.memory.screen_memory import ScreenMemoryStore
+from core.persistence.exceptions_io import ExceptionsIO
 from core.persistence.memory_loader import MemoryLoader
 from core.persistence.memory_saver import MemorySaver
 from core.persistence.run_meta_writer import RunMetaWriter
@@ -61,6 +62,7 @@ class Runner:
 
         self._fg_stop_event = threading.Event()
         self._fg_thread: threading.Thread | None = None
+        self.node_loop_count = 0
 
     # -------------------------------------------------
     # init helpers
@@ -146,6 +148,15 @@ class Runner:
         self.ctx.executor = create_executor(self.ctx)
         self.ctx.traverser = create_traverser(self.ctx)
 
+        # 9. load excluded screen ids (traversal skip list)
+        excluded_ids = ExceptionsIO(self.paths).load_screen_ids()
+        self.ctx.excluded_screen_ids = excluded_ids
+        if self.logger:
+            self.logger.info(
+                f"[EXCEPTIONS] 제외 화면 {len(excluded_ids)}개 로드됨 "
+                f"(경로: {self.paths.exceptions_file})"
+            )
+
     def start_experiment_timer(self) -> None:
         """
         모든 메타 수집 / 앱 실행 / OCR / YOLO init 이후,
@@ -180,6 +191,39 @@ class Runner:
             self.ctx.terminal_reason = "loop_limit"
             return True
 
+        # node loop detection
+        if self._has_node_loop():
+            self.ctx.terminal_reason = "node_loop_limit"
+            return True
+
+        return False
+
+    def _has_node_loop(self) -> bool:
+        if self.ctx is None:
+            return False
+
+        history = self.ctx.screen_history
+        K = self.settings.traversal.node_loop_repetition
+        if len(history) < 2 * K:  # 최소 길이 (패턴 최소 길이 2 * 반복 횟수 K)
+            return False
+
+        # 끝에서부터 반복되는 패턴 탐색 (suffix detection)
+        # L: 패턴의 길이, K: 반복 횟수
+        max_L = len(history) // K
+        for L in range(2, max_L + 1):
+            pattern = history[-L:]
+            # K번 연속 반복되면 루프로 간주
+            is_loop = True
+            for i in range(1, K):
+                segment = history[-L * (i + 1) : -L * i]
+                if segment != pattern:
+                    is_loop = False
+                    break
+            if is_loop:
+                self.node_loop_count += 1
+                if self.logger:
+                    self.logger.warning(f"[LOOP] node loop detected: pattern={pattern} repeated {K} times")
+                return True
         return False
 
     def run(self) -> None:
@@ -246,6 +290,8 @@ class Runner:
             screen_visit_count=self.ctx.screen_visit_count,
             app_restart_count=self.ctx.app_restart_count,
             foreground_recover_count=self.ctx.foreground_recover_count,
+            node_loop_count=self.node_loop_count,
+            excluded_escape_count=self.ctx.excluded_escape_count,
             terminal_reason=self.ctx.terminal_reason,
         )
         self.run_meta_writer.write(run_meta)

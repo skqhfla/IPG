@@ -53,4 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable debug mode",
     )
 
+    parser.add_argument(
+        "--node-loop-repetition",
+        type=int,
+        default=3,
+        help="Repetition count for node loop detection (default: 3)",
+    )
+
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Setup mode: interactively register screens to exclude from traversal",
+    )
+
     return parser

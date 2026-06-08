@@ -53,6 +53,8 @@ class RunMetaWriter:
         screen_visit_count: dict[str, int] | None = None,
         app_restart_count: int = 0,
         foreground_recover_count: int = 0,
+        node_loop_count: int = 0,
+        excluded_escape_count: int = 0,
         terminal_reason: str | None = None,
     ) -> SummaryMeta:
         if screen_visit_count is None:
@@ -67,6 +69,8 @@ class RunMetaWriter:
             packet_event_count=packet_memory.total_event_count(),
             app_restart_count=app_restart_count,
             foreground_recover_count=foreground_recover_count,
+            node_loop_count=node_loop_count,
+            excluded_escape_count=excluded_escape_count,
             terminal_reason=terminal_reason,
         )
 
@@ -83,6 +87,8 @@ class RunMetaWriter:
         screen_visit_count: dict[str, int] | None = None,
         app_restart_count: int = 0,
         foreground_recover_count: int = 0,
+        node_loop_count: int = 0,
+        excluded_escape_count: int = 0,
         terminal_reason: str | None = None,
     ) -> RunMeta:
         experiment = self.build_experiment_meta(settings)
@@ -91,7 +97,9 @@ class RunMetaWriter:
             packet_memory=packet_memory,
             screen_visit_count=screen_visit_count,
             app_restart_count=app_restart_count,
-            foreground_recover_count=foreground_recover_count,   
+            foreground_recover_count=foreground_recover_count,
+            node_loop_count=node_loop_count,
+            excluded_escape_count=excluded_escape_count,
             terminal_reason=terminal_reason,
         )
 

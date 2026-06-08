@@ -5,7 +5,13 @@ from pathlib import Path
 
 
 class PathManager:
-    def __init__(self, root: Path, app: str, timestamp: str) -> None:
+    def __init__(
+        self,
+        root: Path,
+        app: str,
+        timestamp: str,
+        exceptions_root: Path | None = None,
+    ) -> None:
         self.root = root
         self.app = app
         self.timestamp = timestamp
@@ -17,6 +23,9 @@ class PathManager:
         self.memory = self.base / "json"
         self.utg = self.base / "utg"
         self.logs = self.base / "logs"
+
+        self.exceptions_root = exceptions_root or Path("exceptions")
+        self.exceptions_app_dir = self.exceptions_root / app
 
         self.run_meta = self.base / "run_meta.json"
 
@@ -83,3 +92,15 @@ class PathManager:
     @property
     def runtime_log(self) -> Path:
         return self.logs / "runtime.log"
+
+    # -----------------------------
+    # exceptions (traversal skip list — persistent across runs)
+    # -----------------------------
+
+    @property
+    def exceptions_file(self) -> Path:
+        return self.exceptions_app_dir / "exceptions.json"
+
+    @property
+    def exceptions_screenshots(self) -> Path:
+        return self.exceptions_app_dir / "screenshots"

@@ -42,6 +42,10 @@ class RuntimeLoop:
             )
             before_screen_key = before_screen.screen_id.to_key()
 
+            if self._is_excluded(before_screen_key):
+                self._handle_excluded_screen(before_screen_key, stage="before")
+                return
+
             self.ctx.current_screen = before_screen
             self.ctx.current_screen_key = before_screen_key
         else:
@@ -80,6 +84,15 @@ class RuntimeLoop:
                 event_key=event_key,
             )
 
+        if self.ctx.settings.runtime.enable_utg:
+                self._record_utg_transition(
+                    before_screen=before_screen,
+                    after_screen=after_screen,
+                    before_snapshot_id=before_det.snapshot_id if before_det else None,
+                    after_snapshot_id=after_det.snapshot_id,
+                    event_key=event_key,
+                )
+
         transitioned = before_screen_key != after_screen_key
 
         if transitioned:
@@ -88,15 +101,6 @@ class RuntimeLoop:
                 dst_screen_key=after_screen_key,
                 event_key=event_key,
             )
-
-            if self.ctx.settings.runtime.enable_utg:
-                self._record_utg_transition(
-                    before_screen=before_screen,
-                    after_screen=after_screen,
-                    before_snapshot_id=before_det.snapshot_id if before_det else None,
-                    after_snapshot_id=after_det.snapshot_id,
-                    event_key=event_key,
-                )
 
             self.ctx.same_screen_streak = 0
         else:
@@ -108,9 +112,55 @@ class RuntimeLoop:
         self.ctx.current_screen = after_screen
         self.ctx.current_screen_key = after_screen_key
 
+        if self._is_excluded(after_screen_key):
+            self._handle_excluded_screen(after_screen_key, stage="after")
+        else:
+            self.ctx.excluded_streak = 0
+
     # -------------------------------------------------
     # helpers
     # -------------------------------------------------
+
+    def _is_excluded(self, screen_key: str) -> bool:
+        return screen_key in self.ctx.excluded_screen_ids
+
+    def _handle_excluded_screen(self, screen_key: str, *, stage: str) -> None:
+        self.ctx.excluded_streak += 1
+        threshold = self.ctx.settings.traversal.excluded_streak_threshold
+
+        if self.ctx.excluded_streak >= threshold:
+            if self.ctx.logger:
+                self.ctx.logger.info(
+                    f"[EXCLUDED] step={self.ctx.step_count} stage={stage} "
+                    f"screen={screen_key} — streak={self.ctx.excluded_streak} "
+                    f"임계값({threshold}) 도달, 하드 이스케이프(home + relaunch)"
+                )
+            self._hard_escape()
+            return
+
+        if self.ctx.logger:
+            self.ctx.logger.info(
+                f"[EXCLUDED] step={self.ctx.step_count} stage={stage} "
+                f"screen={screen_key} — 제외 화면 도달, back 실행 "
+                f"(streak={self.ctx.excluded_streak}/{threshold})"
+            )
+        self.ctx.adb_device.back()
+        if self.interval_sec > 0:
+            time.sleep(self.interval_sec)
+        self.invalidate_current_screen()
+
+    def _hard_escape(self) -> None:
+        device = self.ctx.adb_device
+        device.home()
+        if self.interval_sec > 0:
+            time.sleep(self.interval_sec)
+        device.launch_app(self.ctx.target_package, self.ctx.launcher_activity)
+        if self.interval_sec > 0:
+            time.sleep(self.interval_sec)
+        self.ctx.excluded_escape_count += 1
+        self.ctx.excluded_streak = 0
+        self.ctx.same_screen_streak = 0
+        self.invalidate_current_screen()
 
     def _recover_if_needed(self) -> None:
         state = self.ctx.foreground_state
@@ -191,6 +241,7 @@ class RuntimeLoop:
         self.ctx.screen_visit_count[screen_key] = (
             self.ctx.screen_visit_count.get(screen_key, 0) + 1
         )
+        self.ctx.screen_history.append(screen_key)
 
         if (
             self.ctx.settings.runtime.draw_detection

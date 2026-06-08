@@ -23,6 +23,8 @@ class YOLODetector(BaseDetector):
         self.ocr_engine = ocr_engine
 
     def detect(self, snapshot_id: str) -> DetectionResult:
+        self._wait_until_stable()
+
         screenshot_path = self.ctx.paths.screen / f"{snapshot_id}.png"
         self.ctx.adb_device.screencap_png_to_file(screenshot_path)
 

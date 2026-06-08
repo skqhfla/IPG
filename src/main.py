@@ -20,6 +20,7 @@ from core.config import (
     UiDetectionMode,
 )
 from core.runtime.runner import Runner
+from core.runtime.setup_runner import SetupRunner
 from core.utils.path_manager import PathManager
 from core.utils.logger import build_logger
 
@@ -28,10 +29,15 @@ def make_default_settings() -> Settings:
     return Settings(
         traversal=TraversalConfig(
             loop_threshold=1000,
-            back_threshold=15,
-            same_screen_threshold=10,
+            back_threshold=1500,
+            same_screen_threshold=1000,
             timeout_sec=3600,
             interval_sec=2,
+            node_loop_repetition=5,
+            excluded_streak_threshold=3,
+            stability_poll_interval_ms=300,
+            stability_max_wait_sec=3.0,
+            stability_required_matches=2,
         ),
         detection=DetectionConfig(
             ocr_mode=OcrMode.PADDLE,
@@ -72,6 +78,9 @@ def apply_cli_overrides(settings: Settings, args) -> Settings:
     else:
         settings.runtime.log_mode = LogMode.NORMAL
 
+    if args.node_loop_repetition:
+        settings.traversal.node_loop_repetition = args.node_loop_repetition
+
     return settings
 
 
@@ -97,6 +106,19 @@ def main() -> None:
         log_mode=settings.runtime.log_mode,
         log_path=paths.runtime_log,
     )
+
+    if args.setup:
+        setup = SetupRunner(
+            settings=settings,
+            paths=paths,
+            app_name=args.app,
+            launcher_activity=None,
+            device_serial=args.serial,
+            adb_path="adb",
+            logger=logger,
+        )
+        setup.run()
+        return
 
     runner = Runner(
         settings=settings,

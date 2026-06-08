@@ -43,6 +43,8 @@ class SummaryMeta:
     packet_event_count: int = 0
     app_restart_count: int = 0
     foreground_recover_count: int = 0
+    node_loop_count: int = 0
+    excluded_escape_count: int = 0
     terminal_reason: str | None = None
 
 

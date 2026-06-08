@@ -10,6 +10,8 @@ from core.detection.xml_parser import parse_uia_xml
 
 class UIAutomatorDetector(BaseDetector):
     def detect(self, snapshot_id: str) -> DetectionResult:
+        self._wait_until_stable()
+
         screenshot_path = self.capture(snapshot_id)
 
         xml_path = self.ctx.paths.xml / f"{snapshot_id}.xml"

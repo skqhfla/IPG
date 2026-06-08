@@ -53,10 +53,16 @@ class RuntimeContext:
 
     app_restart_count: int = 0
     foreground_recover_count: int = 0
+    excluded_escape_count: int = 0
     terminal_reason: str | None = None
 
     step_count: int = 0
     same_screen_streak: int = 0
+    excluded_streak: int = 0
+
+    screen_history: list[str] = field(default_factory=list)
+
+    excluded_screen_ids: set[str] = field(default_factory=set)
 
     logger: Any = None
 
