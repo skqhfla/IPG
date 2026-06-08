@@ -9,6 +9,7 @@ import android.util.Log
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.UiDevice
@@ -20,6 +21,10 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -66,20 +71,24 @@ class IpgInstrumentationTest {
         // Instrumented tests can't register exported receivers reliably; instead
         // we poll a sentinel file the host can `touch` to request an on-demand dump.
         val triggerFile = handler.triggerFile()
-        while (!Thread.currentThread().isInterrupted) {
-            try {
-                if (triggerFile.exists()) {
-                    try { triggerFile.delete() } catch (_: Throwable) {}
-                    try {
-                        handler.manualDump()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "manual dump failed: ${t.message}")
+        try {
+            while (!Thread.currentThread().isInterrupted) {
+                try {
+                    if (triggerFile.exists()) {
+                        try { triggerFile.delete() } catch (_: Throwable) {}
+                        try {
+                            handler.manualDump()
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "manual dump failed: ${t.message}")
+                        }
                     }
+                    Thread.sleep(TRIGGER_POLL_MS)
+                } catch (_: InterruptedException) {
+                    break
                 }
-                Thread.sleep(TRIGGER_POLL_MS)
-            } catch (_: InterruptedException) {
-                break
             }
+        } finally {
+            handler.shutdown()
         }
     }
 
@@ -99,9 +108,28 @@ private class EventHandler(private val ctx: Context, private val ui: UiAutomatio
     private val lastContentChanged = HashMap<String, Long>()
 
     @Volatile private var lastWindowClass: String = ""
+    // IME(소프트 키보드) 가시성. AccessibilityWindowInfo.TYPE_INPUT_METHOD 윈도우의
+    // 존재로 판정 → ROM 의존 클래스명 패턴 매칭 없이도 정확. 상태 바뀔 때만 한 줄
+    // emit (IME_VISIBLE / IME_HIDDEN) 해서 host(a11y_event_listener) 가 캐시.
+    @Volatile private var lastImeVisible: Boolean = false
     private var configMtime = 0L
-    private var configPackages: Set<String>? = null
-    private var configAppLabel: String? = null
+    // dumpExecutor 가 백그라운드 스레드에서 resolveOutputs() 통해 읽으므로 @Volatile.
+    @Volatile private var configPackages: Set<String>? = null
+    @Volatile private var configAppLabel: String? = null
+
+    // dumpHierarchy + captureScreenshot 은 한 사이클이 1-2s 걸리는 무거운 작업.
+    // a11y 콜백 스레드에서 인라인 실행하면 swipe 직후 WINDOW_CONTENT_CHANGED 폭주에
+    // 큐가 막혀 VIEW_SCROLLED 도 줄 끝에 갇히는 회귀가 있었다. 단일 worker 스레드 +
+    // 작은 bounded queue + DiscardOldestPolicy 로 옮겨, 콜백 스레드는 emit 만 하고
+    // 즉시 return. burst 가 너무 길면 가장 오래된 (이미 stale 한) dump 부터 자연
+    // drop — 어차피 swipe 도중 N-1개 중간 프레임은 final 프레임이 오면 의미 없음.
+    private val dumpExecutor: ThreadPoolExecutor = ThreadPoolExecutor(
+        1, 1,
+        0L, TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue<Runnable>(DUMP_QUEUE_CAPACITY),
+        ThreadFactory { r -> Thread(r, "ipg-dump").apply { isDaemon = true } },
+        ThreadPoolExecutor.DiscardOldestPolicy(),
+    )
 
     fun emitConnected() {
         maybeReloadConfig()
@@ -117,6 +145,8 @@ private class EventHandler(private val ctx: Context, private val ui: UiAutomatio
             val pkgs = configPackages
             if (pkgs != null) put("packagesFilter", org.json.JSONArray(pkgs.toList()))
         })
+        // host 가 connect 시점에 정확한 IME 상태를 알 수 있게 한 번 seed.
+        maybeEmitImeState()
     }
 
     fun triggerFile(): File = File(captureBaseDir, "dump_now.trigger")
@@ -134,11 +164,47 @@ private class EventHandler(private val ctx: Context, private val ui: UiAutomatio
         dumpHierarchy(ts, "MANUAL_DUMP", triggerJson)
     }
 
+    /**
+     * AccessibilityWindowInfo.TYPE_INPUT_METHOD 윈도우가 현재 떠 있으면 true.
+     * UiAutomation.getWindows() 가 윈도우 type 메타데이터를 직접 주므로 ROM 별
+     * IME 클래스명 패턴 매칭 없이도 정확. listener 콜백 스레드에서만 호출되며
+     * 한 dump 사이클(<1ms) 이내로 종료.
+     */
+    private fun isImeWindowVisible(): Boolean {
+        return try {
+            ui.windows?.any { w ->
+                try { w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+                catch (_: Throwable) { false }
+            } == true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /** IME 가시성 transition 만 한 줄 emit. 상태 변화 없으면 noop. */
+    private fun maybeEmitImeState() {
+        val visible = isImeWindowVisible()
+        if (visible == lastImeVisible) return
+        lastImeVisible = visible
+        emit(JSONObject().apply {
+            put("ts", System.currentTimeMillis())
+            put("type", if (visible) "IME_VISIBLE" else "IME_HIDDEN")
+            put("session", sessionId)
+        })
+    }
+
     fun handle(event: AccessibilityEvent) {
         maybeReloadConfig()
 
         val type = event.eventType
         val pkg = event.packageName?.toString().orEmpty()
+
+        // IME 상태 변화는 보통 WINDOW_STATE_CHANGED 또는 WINDOWS_CHANGED 와 동반
+        // 발생. 매 이벤트마다 windows 조회는 비싸므로 두 타입만 검사.
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            maybeEmitImeState()
+        }
 
         val filter = configPackages
         if (filter != null && filter.isNotEmpty() && pkg !in filter) return
@@ -172,34 +238,32 @@ private class EventHandler(private val ctx: Context, private val ui: UiAutomatio
                 .take(TEXT_MAX)
             if (text.isNotEmpty()) put("text", text)
 
-            when (type) {
-                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                    val flags = contentChangeFlags(event.contentChangeTypes)
-                    if (flags.isNotEmpty()) put("change", flags)
-                }
-                AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
-                    put("scrollX", event.scrollX)
-                    put("scrollY", event.scrollY)
-                    put("fromIndex", event.fromIndex)
-                    put("toIndex", event.toIndex)
-                    put("itemCount", event.itemCount)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        put("scrollDeltaX", event.scrollDeltaX)
-                        put("scrollDeltaY", event.scrollDeltaY)
-                        put("maxScrollX", event.maxScrollX)
-                        put("maxScrollY", event.maxScrollY)
-                    }
-                }
-                AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
-                    put("isToast", cls.contains("android.widget.Toast"))
-                }
-            }
+            addEventPayload(event, type, cls, this)
 
             captureSourceInto(event, this)
         }
 
         emit(eventJson)
-        dumpHierarchy(ts, typeName, eventJson)
+        // VIEW_SCROLLED 는 host 의 wait_for_scroll_evt 가 event payload(scrollX/dy/idx
+        // 등) 만 소비하므로 hierarchy XML + screenshot 까지 만들 필요가 없다 — skip.
+        // 나머지 타입은 dumpExecutor 큐에 enqueue → 콜백 스레드는 즉시 return 해서
+        // 다음 a11y 이벤트 대기. dumpExecutor 가 단일 worker 라 dump 순서는 보존되고,
+        // 큐가 가득 차면 DiscardOldestPolicy 가 가장 오래된 stale dump 부터 drop.
+        if (type != AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            dumpExecutor.execute {
+                try {
+                    dumpHierarchy(ts, typeName, eventJson)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "bg dump failed: ${t.message}")
+                }
+            }
+        }
+    }
+
+    fun shutdown() {
+        try {
+            dumpExecutor.shutdownNow()
+        } catch (_: Throwable) {}
     }
 
     private fun maybeReloadConfig() {
@@ -427,6 +491,7 @@ private class EventHandler(private val ctx: Context, private val ui: UiAutomatio
         attr(sb, "password", node.isPassword.toString())
         attr(sb, "selected", node.isSelected.toString())
         attr(sb, "important-for-accessibility", node.isImportantForAccessibility.toString())
+        attr(sb, "visible-to-user", node.isVisibleToUser.toString())
         attr(sb, "bounds", "[${rect.left},${rect.top}][${rect.right},${rect.bottom}]")
 
         val childCount = node.childCount
@@ -477,11 +542,31 @@ private class EventHandler(private val ctx: Context, private val ui: UiAutomatio
     }
 
     private fun eventTypeName(t: Int): String = when (t) {
+        AccessibilityEvent.TYPE_VIEW_CLICKED -> "VIEW_CLICKED"
+        AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> "VIEW_LONG_CLICKED"
+        AccessibilityEvent.TYPE_VIEW_SELECTED -> "VIEW_SELECTED"
+        AccessibilityEvent.TYPE_VIEW_FOCUSED -> "VIEW_FOCUSED"
+        AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> "VIEW_TEXT_CHANGED"
         AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "WINDOW_STATE_CHANGED"
+        AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> "NOTIFICATION_STATE_CHANGED"
+        AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> "VIEW_HOVER_ENTER"
+        AccessibilityEvent.TYPE_VIEW_HOVER_EXIT -> "VIEW_HOVER_EXIT"
+        AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START -> "TOUCH_EXPLORATION_GESTURE_START"
+        AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_END -> "TOUCH_EXPLORATION_GESTURE_END"
         AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "WINDOW_CONTENT_CHANGED"
         AccessibilityEvent.TYPE_VIEW_SCROLLED -> "VIEW_SCROLLED"
-        AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> "NOTIFICATION_STATE_CHANGED"
-        AccessibilityEvent.TYPE_VIEW_CLICKED -> "VIEW_CLICKED"
+        AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> "VIEW_TEXT_SELECTION_CHANGED"
+        AccessibilityEvent.TYPE_ANNOUNCEMENT -> "ANNOUNCEMENT"
+        AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED -> "VIEW_ACCESSIBILITY_FOCUSED"
+        AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED -> "VIEW_ACCESSIBILITY_FOCUS_CLEARED"
+        AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY -> "VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY"
+        AccessibilityEvent.TYPE_GESTURE_DETECTION_START -> "GESTURE_DETECTION_START"
+        AccessibilityEvent.TYPE_GESTURE_DETECTION_END -> "GESTURE_DETECTION_END"
+        AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> "TOUCH_INTERACTION_START"
+        AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> "TOUCH_INTERACTION_END"
+        AccessibilityEvent.TYPE_WINDOWS_CHANGED -> "WINDOWS_CHANGED"
+        AccessibilityEvent.TYPE_VIEW_CONTEXT_CLICKED -> "VIEW_CONTEXT_CLICKED"
+        AccessibilityEvent.TYPE_ASSIST_READING_CONTEXT -> "ASSIST_READING_CONTEXT"
         else -> "OTHER_$t"
     }
 
@@ -502,9 +587,91 @@ private class EventHandler(private val ctx: Context, private val ui: UiAutomatio
         return parts.joinToString("|")
     }
 
+    /** Emit every AccessibilityEvent payload field that carries signal.
+     *  Index/scroll fields use -1 (AccessibilityRecord.UNDEFINED) as "unset" and
+     *  are omitted when unset; boolean properties are emitted only when true. */
+    private fun addEventPayload(
+        event: AccessibilityEvent,
+        type: Int,
+        cls: String,
+        into: JSONObject,
+    ) {
+        into.put("eventTime", event.eventTime)
+        if (event.windowId != -1) into.put("windowId", event.windowId)
+        if (event.action != 0) into.put("action", event.action)
+        if (event.movementGranularity != 0) into.put("movementGranularity", event.movementGranularity)
+
+        val cd = event.contentDescription?.toString().orEmpty().take(TEXT_MAX)
+        if (cd.isNotEmpty()) into.put("contentDesc", cd)
+        val before = event.beforeText?.toString().orEmpty().take(TEXT_MAX)
+        if (before.isNotEmpty()) into.put("beforeText", before)
+
+        // VIEW_SCROLLED keeps emitting its fields unconditionally (even -1) so the
+        // host's scroll-exhaustion heuristic in loop.py sees the same shape as before.
+        val scrolled = type == AccessibilityEvent.TYPE_VIEW_SCROLLED
+        if (scrolled || event.fromIndex != -1) into.put("fromIndex", event.fromIndex)
+        if (scrolled || event.toIndex != -1) into.put("toIndex", event.toIndex)
+        if (event.currentItemIndex != -1) into.put("currentItemIndex", event.currentItemIndex)
+        if (scrolled || event.itemCount != -1) into.put("itemCount", event.itemCount)
+        if (event.addedCount != -1) into.put("addedCount", event.addedCount)
+        if (event.removedCount != -1) into.put("removedCount", event.removedCount)
+
+        if (scrolled || event.scrollX != -1) into.put("scrollX", event.scrollX)
+        if (scrolled || event.scrollY != -1) into.put("scrollY", event.scrollY)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (scrolled || event.scrollDeltaX != -1) into.put("scrollDeltaX", event.scrollDeltaX)
+            if (scrolled || event.scrollDeltaY != -1) into.put("scrollDeltaY", event.scrollDeltaY)
+            if (scrolled || event.maxScrollX != -1) into.put("maxScrollX", event.maxScrollX)
+            if (scrolled || event.maxScrollY != -1) into.put("maxScrollY", event.maxScrollY)
+        }
+
+        val props = mutableListOf<String>()
+        if (event.isEnabled) props += "enabled"
+        if (event.isChecked) props += "checked"
+        if (event.isPassword) props += "password"
+        if (event.isFullScreen) props += "fullScreen"
+        if (event.isScrollable) props += "scrollable"
+        if (props.isNotEmpty()) into.put("props", props.joinToString("|"))
+
+        val change = contentChangeFlags(event.contentChangeTypes)
+        if (change.isNotEmpty()) into.put("change", change)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val wc = windowChangeFlags(event.windowChanges)
+            if (wc.isNotEmpty()) into.put("windowChanges", wc)
+        }
+
+        if (event.recordCount > 0) into.put("recordCount", event.recordCount)
+
+        if (type == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
+            into.put("isToast", cls.contains("android.widget.Toast"))
+        }
+    }
+
+    private fun windowChangeFlags(flags: Int): String {
+        if (flags == 0) return ""
+        val parts = mutableListOf<String>()
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_ADDED != 0) parts += "ADDED"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_REMOVED != 0) parts += "REMOVED"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_TITLE != 0) parts += "TITLE"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_BOUNDS != 0) parts += "BOUNDS"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_LAYER != 0) parts += "LAYER"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_ACTIVE != 0) parts += "ACTIVE"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_FOCUSED != 0) parts += "FOCUSED"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_ACCESSIBILITY_FOCUSED != 0) parts += "A11Y_FOCUSED"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_PARENT != 0) parts += "PARENT"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_CHILDREN != 0) parts += "CHILDREN"
+        if (flags and AccessibilityEvent.WINDOWS_CHANGE_PIP != 0) parts += "PIP"
+        return parts.joinToString("|")
+    }
+
     companion object {
         private const val TAG = "IPG_EVT"
         private const val CONTENT_DEBOUNCE_MS = 300L
         private const val TEXT_MAX = 500
+        // dumpExecutor 큐 상한. 한 dump 가 ~1s 라 8개면 swipe 직후 burst 정도는
+        // 자연 흡수, 그 이상 쌓이면 어차피 사용자 화면에 의미 있는 시점이 지나
+        // stale 한 dump 들이라 DiscardOldestPolicy 로 자동 drop.
+        private const val DUMP_QUEUE_CAPACITY = 8
     }
 }
