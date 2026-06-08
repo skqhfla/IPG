@@ -62,6 +62,9 @@ class ADBDevice:
     def home(self) -> None:
         self._cmd.home()
 
+    def is_ime_visible(self) -> bool:
+        return self._cmd.is_ime_visible()
+
     def tap(self, x: int, y: int) -> None:
         self._cmd.tap(x, y)
 

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 import time
 from pathlib import Path
 
 from core.adb.netstats import PacketStat
-from core.app_types import EventType, Screen
+from core.app_types import EventType, Screen, ScreenID
 from core.detection.result import DetectionResult
 from core.detection.draw import draw_elements_on_image
 from core.graph.recover_graph import RecoverEvent
@@ -94,10 +95,6 @@ class RuntimeLoop:
         if is_scroll_swipe and self.ctx.a11y_listener is not None:
             self.ctx.a11y_listener.clear()
 
-        # swipe 직전 foreground (pkg, activity). swipe 후 값과 비교해
-        # '화면 전환이 있었는지'를 판정한다 (refresh/scroll vs navigation 구분).
-        before_fg = self.ctx.foreground_state.get()
-
         # 이벤트 직전 UID 패킷 누적치 snapshot. capture_time_sec 후 다시 찍어
         # 차분을 packet_memory에 기록한다 (None이면 측정 비활성).
         before_stat = (
@@ -109,9 +106,8 @@ class RuntimeLoop:
         event_key = self.ctx.executor.execute(action)
 
         scrolled_progress = False
-        page_changed = False
         if is_scroll_swipe:
-            scrolled_progress, page_changed = self._handle_scroll_feedback(
+            scrolled_progress = self._handle_scroll_feedback(
                 action=action,
                 before_screen_key=before_screen_key,
             )
@@ -135,6 +131,34 @@ class RuntimeLoop:
             and action.get("direction") == "up"
         ):
             time.sleep(1.0)
+
+        # tap 이 IME(소프트 키보드)를 띄운 경우: 다음 element 시도를 위해 BACK 으로
+        # 닫는다. element 본인은 이미 "실행됨" 으로 마킹되므로 (라인 ~196 의
+        # mark_event_executed) 다음 iteration 의 정책이 같은 element 를 다시 고르지
+        # 않는다 — 자연스럽게 다른 trigger 로 넘어감. BACK 한 번은 안드로이드 표준
+        # 동작상 IME 만 닫고 activity stack 은 보존됨.
+        # 1차 신호: listener 가 emit 한 IME_VISIBLE/HIDDEN 으로 캐시된 상태(0 cost).
+        # 2차 폴백: 구 listener 또는 listener 없는 환경 → dumpsys input_method (~400ms).
+        if action.get("type") == "tap":
+            ime_visible = False
+            if self.ctx.a11y_listener is not None:
+                ime_visible = self.ctx.a11y_listener.is_ime_visible()
+            if not ime_visible and self.ctx.a11y_listener is None:
+                # listener 자체가 없는 경우만 dumpsys 폴백 — 있으면 신뢰
+                ime_visible = self.ctx.adb_device.is_ime_visible()
+            if ime_visible:
+                if self.ctx.logger:
+                    self.ctx.logger.info(
+                        f"[KEYBOARD] screen={before_screen_key} "
+                        f"element_id={action.get('element_id')} "
+                        f"identity={action.get('identity_key')!r} "
+                        f"text={action.get('element_text')!r} "
+                        f"→ IME opened, mark executed + dismiss (BACK)"
+                    )
+                self.ctx.adb_device.back()
+                # IME dismiss 애니메이션 + 콘텐츠 reflow 시간 — 너무 짧으면 다음 dump 에
+                # IME 가 아직 일부 잡혀 element bbox 가 viewport 안에 fit 안 됨.
+                time.sleep(0.5)
 
         after_det = self._detect_next_screen()
 
@@ -162,43 +186,37 @@ class RuntimeLoop:
             )
             return
 
-        # 스크롤 swipe 동안 activity 전환(WINDOW_STATE_CHANGED)이 없었다면
-        # 스크롤·새로고침(pull-to-refresh)·로딩 스피너 모두 같은 화면의
-        # sub-state이므로, 콘텐츠 해시가 달라져도 screen_id를 유지한다.
-        # 이렇게 해야 refresh가 화면을 분절시켜 무한 새로고침 루프에 빠지지
-        # 않는다 (exhausted 메모리가 같은 screen_id에 누적되어 재시도 차단).
-        # 진짜 navigation은 WINDOW_STATE_CHANGED로 activity가 바뀌어 제외된다.
-        # scrolled_progress(VIEW_SCROLLED 수신)는 foreground 정보가 없을 때의
-        # 보조 신호.
-        keep_same_screen = False
-        if is_scroll_swipe and before_screen is not None and not page_changed:
-            after_fg = self.ctx.foreground_state.get()
-            activity_unchanged = (
-                before_fg is not None
-                and after_fg is not None
-                and before_fg == after_fg
-            )
-            keep_same_screen = activity_unchanged or scrolled_progress
-
-        if (
-            keep_same_screen
-            and before_screen is not None
-            and after_det.screen.screen_id != before_screen.screen_id
-        ):
-            if self.ctx.logger:
-                self.ctx.logger.info(
-                    f"[SCROLL] same-screen 유지: "
-                    f"{after_det.screen.screen_id} -> {before_screen.screen_id}"
-                )
-            after_det.screen.screen_id = before_screen.screen_id
-
+        # 스크롤 swipe 후엔 viewport가 바뀌었다고 보고 별도 screen_id로
+        # 분리한다 — 같은 activity 안이라도 visible content가 달라지므로
+        # 다른 화면. visible-only tree_signature 매처가 같은 viewport
+        # 재방문은 자동으로 같은 screen_id로 묶어 무한 새로고침 루프도
+        # 차단된다(refresh 후 visible 구성은 동일).
+        #
+        # gate_reuse(transition_seq + identity 검사)는 VIEW_SCROLLED를
+        # transition 신호로 보지 않으므로 스크롤 후에도 reuse=True가
+        # 잡혀 직전 screen_id를 그대로 재사용해버린다 → 강제로 무력화.
         after_screen = self._register_detection(
             det=after_det,
             snapshot_id=after_det.snapshot_id,
+            force_match=is_scroll_swipe,
         )
         after_screen_key = after_screen.screen_id.to_key()
         # 다음 step의 before_snapshot_id가 될 값을 미리 저장한다.
         self.ctx.current_snapshot_id = after_det.snapshot_id
+
+        # 스크롤로 도달한 새 viewport는 직전 viewport의 executed_events 를
+        # identity_key 매칭으로 상속받아, overlap 영역의 중복 탭을 막는다.
+        # swipe 방향 마크는 상속하지 않는다 — 각 viewport 는 자신의 스크롤
+        # 가능성을 독립적으로 판단해야 한다.
+        if (
+            is_scroll_swipe
+            and before_screen is not None
+            and before_screen_key != after_screen_key
+        ):
+            self.ctx.app_memory.inherit_executed_from(
+                dst_screen_key=after_screen_key,
+                src_screen_key=before_screen_key,
+            )
 
         # 스크롤 swipe는 _handle_scroll_feedback에서 이미 swipe 메모리를
         # 기록하므로, executed_events 중복 기록을 피하기 위해 제외한다.
@@ -231,14 +249,10 @@ class RuntimeLoop:
             self._flush_memory()
 
             self.ctx.same_screen_streak = 0
-        elif is_scroll_swipe and keep_same_screen:
-            # 같은 화면 내 스크롤·새로고침은 stuck이 아니다 — 방향별 exhausted
-            # 메모리가 종료를 보장하므로 same_screen_limit 조기 종료를 막기
-            # 위해 streak을 리셋한다. 종료가 아닌 시점에도 누적 메모리를
-            # 디스크에 반영한다.
-            self.ctx.same_screen_streak = 0
-            self._flush_memory()
         else:
+            # transition 없음 = 같은 viewport 재방문(스크롤이 헛돌아 같은 화면
+            # 으로 매처가 묶거나, tap이 화면 안 바꿨음). stuck 카운터 증가 —
+            # same_screen_limit 도달 시 정책이 back/escape 트리거.
             self.ctx.same_screen_streak += 1
 
         # 연속 스크롤 카운터: 스크롤 swipe면 +1, tap/back 등 다른 행동이면 0.
@@ -303,26 +317,25 @@ class RuntimeLoop:
         *,
         action: dict,
         before_screen_key: str,
-    ) -> tuple[bool, bool]:
+    ) -> bool:
         """
         Scrollable element 대상 swipe 직후, VIEW_SCROLLED 이벤트를 통해
         해당 방향이 더 진행 가능한지(미고갈) / 끝까지 도달했는지(고갈) 판정해
         element 및 screen-level memory에 기록.
 
-        Returns:
-            (scrolled_progress, page_changed)
-            - scrolled_progress: VIEW_SCROLLED 수신 여부. True면 호출자가
-              '같은 화면 스크롤'로 간주해 screen_id를 유지한다.
-            - page_changed: ViewPager/HorizontalScrollView류에서 가로 페이지
-              전환이 일어났는지. True면 콘텐츠가 사실상 다른 화면이므로 호출자가
-              keep_same_screen 휴리스틱을 건너뛰어야 한다.
+        스크롤 후 screen_id 는 _register_detection(force_match=True) 가
+        viewport 단위로 분리해 부여하므로, 여기서는 swipe 방향 마크와
+        overlap 보정만 담당한다.
+
+        Returns: scrolled_progress — VIEW_SCROLLED 수신 여부. 호출자가
+        pull-to-refresh 스피너 settle 같은 후처리 분기에 쓴다.
         """
         listener = self.ctx.a11y_listener
         direction = action.get("direction")
         identity_key = action.get("identity_key")
 
         if not direction or not identity_key:
-            return False, False
+            return False
 
         # 무조건 tried 마킹 — 시도는 했으므로
         self.ctx.app_memory.mark_swipe_tried(
@@ -376,62 +389,7 @@ class RuntimeLoop:
                 f"item=({d.get('fromIndex')}/{d.get('toIndex')}/{d.get('itemCount')})"
             )
 
-        # VIEW_SCROLLED 수신 = 콘텐츠가 실제로 스크롤됐다는 신호.
-        # 이번 swipe로 끝(exhausted)에 도달했더라도 '스크롤은 일어난 것'이므로,
-        # exhausted와 무관하게 같은 화면(스크롤 sub-state)으로 간주한다.
-        # (exhausted를 묶으면 짧은 리스트에서 1회 스크롤=끝 도달 시 화면이
-        #  분절되어 A↔B 핑퐁 → node_loop 조기 종료가 발생함.)
-        scrolled_progress = evt is not None
-        page_changed = self._is_page_change_scroll(summary)
-        if page_changed and self.ctx.logger:
-            d = evt.raw if evt is not None else {}
-            src = d.get("source") or {}
-            self.ctx.logger.info(
-                f"[SCROLL] page-change 감지: "
-                f"class={d.get('class')} src_class={src.get('class')} "
-                f"total=({summary.total_dx},{summary.total_dy})"
-            )
-        return scrolled_progress, page_changed
-
-    @staticmethod
-    def _is_page_change_scroll(summary) -> bool:
-        """
-        수집된 VIEW_SCROLLED 요약이 ViewPager류의 가로 페이지 전환인지 판정.
-
-        ViewPager / ViewPager2 / HorizontalScrollView 의 가로 스와이프는 같은
-        Activity 안에서 일어나지만 콘텐츠는 사실상 다른 화면이다. 일반 세로
-        스크롤(ScrollView/RecyclerView)과 분리해야 keep_same_screen 휴리스틱이
-        화면 전환을 잘못 병합하지 않는다.
-
-        판정 조건(모두 만족):
-          1) 마지막 VIEW_SCROLLED 의 class 또는 source.class 가
-             ViewPager / HorizontalScrollView 계열
-          2) 누적 가로 이동(|total_dx|)이 일정 픽셀 이상 (잔여 settling 배제)
-          3) 가로 이동이 세로 이동보다 우세 (|total_dx| > |total_dy|)
-        """
-        if summary is None or summary.last_evt is None:
-            return False
-
-        raw = summary.last_evt.raw or {}
-        cls = raw.get("class") or ""
-        src = raw.get("source") or {}
-        src_cls = src.get("class") if isinstance(src, dict) else ""
-        src_cls = src_cls or ""
-
-        pager_markers = ("ViewPager", "HorizontalScrollView")
-        is_pager = any(m in cls or m in src_cls for m in pager_markers)
-        if not is_pager:
-            return False
-
-        abs_dx = abs(summary.total_dx or 0)
-        abs_dy = abs(summary.total_dy or 0)
-
-        # 잔여 settling(예: delta=(11,0))은 제외하기 위한 절대 최소치
-        if abs_dx < 100:
-            return False
-
-        # 가로 우세 (세로 스크롤과 동시에 약간의 가로 떨림이 있더라도 제외)
-        return abs_dx > abs_dy
+        return evt is not None
 
     def _ensure_scroll_overlap(
         self,
@@ -513,6 +471,18 @@ class RuntimeLoop:
                 f"target_advance={int(target_advance)}px back={back_dist}px "
                 f"(overlap {overlap_ratio:.0%} 복원)"
             )
+
+    @staticmethod
+    def _multiset_jaccard(
+        a: tuple[str, ...],
+        b: tuple[str, ...],
+    ) -> float:
+        ca = Counter(a)
+        cb = Counter(b)
+        keys = set(ca) | set(cb)
+        inter = sum(min(ca[k], cb[k]) for k in keys)
+        union = sum(max(ca[k], cb[k]) for k in keys)
+        return inter / union if union else 0.0
 
     @staticmethod
     def _is_scroll_exhausted(*, evt, direction: str) -> bool:
@@ -776,19 +746,92 @@ class RuntimeLoop:
         *,
         det: DetectionResult,
         snapshot_id: str,
+        force_match: bool = False,
     ) -> Screen:
+        """
+        force_match=True 면 gate_reuse 를 우회하고 항상 visible-only
+        tree_signature 매처를 돌린다. 호출자가 직전 swipe 가 스크롤이라
+        viewport 가 바뀌었다는 사실을 알 때 사용 — VIEW_SCROLLED 는
+        transition_seq 에 잡히지 않아 gate_reuse=True 가 잡혀 직전
+        screen_id 가 그대로 재사용되는 회귀를 막는다.
+        """
         detected_screen = det.screen
 
-        # AppMemory의 canonical screen 사용.
-        # screen_id.threshold가 설정돼 있으면 구조 기반 매칭으로
-        # 같은 화면(스크롤·로딩·탭 변종)을 하나의 screen_id로 묶는다.
+        # ── transition 게이트 ─────────────────────────────────────────────
+        # 1차 신호: listener 의 transition_seq (WINDOW_STATE_CHANGED /
+        #            VIEW_SELECTED / WINDOWS_CHANGED-top-level).
+        # 2차 방어선: XML 의 identity 속성(activity/window_id/rotation/package).
+        #            host logcat 이 고부하 시 STATE_CHANGED 라인을 드롭해
+        #            trans_seq 가 안 늘어나는 케이스가 실제로 관측됨
+        #            (20260601_160453 의 89~93 = Main↔HomeMember↔HomeEditor
+        #            오실레이션). APK 의 lastWindowClass 는 dump 시점 값이라
+        #            logcat 손실과 무관하게 정확 → 직전 activity 와 다르면
+        #            게이트 강제 해제 + 매처 호출.
+        configured_thr = getattr(
+            self.ctx.settings.screen_id, "match_threshold", 0.0
+        )
+        listener = getattr(self.ctx, "a11y_listener", None)
+        cur_trans_seq = listener.transition_seq() if listener is not None else 0
+        prev_screen_value = self.ctx.last_screen_id_value
+
+        identity_changed = (
+            (detected_screen.activity or None) != self.ctx.last_activity
+            or (detected_screen.package or None) != self.ctx.last_package
+            or (detected_screen.rotation or 0) != self.ctx.last_rotation
+            or detected_screen.window_id != self.ctx.last_window_id
+        )
+        # 4속성이 모두 같아도 본문 fragment가 통째로 교체된 케이스(Xiaomi 하단
+        # 탭 전환처럼 STATE_CHANGED/SELECTED 이벤트가 안 떠 trans_seq·identity
+        # 모두 변화 없음)는 직전과 visible-only tree_signature Jaccard로
+        # 분리한다. 임계 미만이면 게이트 해제 → 매처가 정상 호출되어 새
+        # screen_id 가 부여된다. 직전/현재 signature가 비면(빈 트리 retry 실패
+        # 등) 비교 자체를 건너뛰고 기존 게이트 정책 그대로.
+        content_diverged = False
+        if (
+            prev_screen_value is not None
+            and self.ctx.last_tree_signature
+            and detected_screen.tree_signature
+        ):
+            sim = self._multiset_jaccard(
+                self.ctx.last_tree_signature,
+                detected_screen.tree_signature,
+            )
+            if sim < configured_thr:
+                content_diverged = True
+
+        gate_reuse = (
+            not force_match
+            and prev_screen_value is not None
+            and cur_trans_seq == self.ctx.last_transition_seq
+            and not identity_changed
+            and not content_diverged
+        )
+
+        if gate_reuse:
+            # 같은 화면 — 직전 screen_id 그대로 재사용. element 메모리는 새
+            # detection 결과로 갱신되게 둔다.
+            detected_screen.screen_id = ScreenID(value=prev_screen_value)
+            effective_thr = 0.0
+        else:
+            # 첫 detection 이거나 transition 신호(이벤트 카운터 증가 OR
+            # XML identity 변화) 발생 → 매처가 (package, activity, rotation)
+            # 버킷에서 Jaccard 로 같은 화면 후보 검색. 다른 activity 가 같은
+            # screen_id 로 잘못 합쳐지는 회귀 차단.
+            effective_thr = configured_thr
+
         screen = self.ctx.app_memory.get_or_add_screen(
             detected_screen,
-            match_threshold=getattr(
-                self.ctx.settings.screen_id, "match_threshold", 0.0
-            ),
+            match_threshold=effective_thr,
         )
         screen_key = screen.screen_id.to_key()
+        self.ctx.last_screen_id_value = screen_key
+        self.ctx.last_transition_seq = cur_trans_seq
+        self.ctx.last_activity = detected_screen.activity or None
+        self.ctx.last_package = detected_screen.package or None
+        self.ctx.last_rotation = detected_screen.rotation or 0
+        self.ctx.last_window_id = detected_screen.window_id
+        self.ctx.last_tree_signature = detected_screen.tree_signature
+        # ──────────────────────────────────────────────────────────────────
 
         # 직전 force-recover 이벤트의 dst를 첫 target detection 시점에 채운다.
         pending = self.ctx.recover_graph.last_pending()

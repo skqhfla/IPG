@@ -67,6 +67,28 @@ class ADBCommands:
     def input_text(self, text: str) -> None:
         self.shell_text(f'input text "{text}"')
 
+    def is_ime_visible(self) -> bool:
+        """
+        IME(소프트 키보드) 가 떠 있는지 dumpsys input_method 로 조회.
+        'mInputShown=true' / 'mInputShown=false' 가 가장 안정적인 신호.
+        ROM 에 따라 'mIsInputViewShown' / 'mWindowVisible' 표현이 다른 폴백도 같이 본다.
+        dumpsys 가 어떤 이유로 비어도 False (보수적 — 안 보인다고 가정).
+        """
+        out = self.shell_text("dumpsys input_method", check=False)
+        if not out:
+            return False
+        # 우선순위 1: 명시적 mInputShown=true
+        if "mInputShown=true" in out:
+            return True
+        if "mInputShown=false" in out:
+            return False
+        # 폴백: 일부 Samsung/Xiaomi 가 다른 키 사용
+        if "mInputViewShown=true" in out:
+            return True
+        if "mIsInputViewShown=true" in out:
+            return True
+        return False
+
     # -------------------------
     # app control
     # -------------------------

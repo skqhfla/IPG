@@ -8,6 +8,7 @@ from core.detection.merge.strategies import IoUPriorityMerge
 from core.detection.ocr_fill import fill_element_text_from_ocr
 from core.detection.postprocess import (
     filter_elements_by_modal_if_detected,
+    filter_elements_to_viewport,
     normalize_elements,
 )
 from core.detection.result import DetectionResult
@@ -89,6 +90,11 @@ class HybridDetector(BaseDetector):
                 f"[MODAL_FILTER] snapshot={snapshot_id} kept "
                 f"{after_modal_filter}/{before_modal_filter} elements"
             )
+
+        merged = filter_elements_to_viewport(
+            merged,
+            viewport_wh=effective_wh,
+        )
 
         merged = normalize_elements(merged)
 

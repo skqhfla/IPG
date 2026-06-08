@@ -64,12 +64,17 @@ def match_screen(
     candidate를 같은 화면으로 볼 기존 screen_key를 찾는다.
 
     판정:
-      1) 같은 (window_id, activity) 버킷으로 후보를 제한
-         → activity 전환·다른 window는 무조건 다른 화면.
-      2) 버킷 안에서 canonical subtree-hash multiset Jaccard가 최대이고
+      1) 같은 (package, activity, rotation) 버킷으로 후보를 제한
+         → 다른 activity·다른 회전은 무조건 다른 화면.
+         window_id 는 버킷 키에서 제외 — 같은 activity 가 force-stop+relaunch
+         또는 destroy/recreate 로 새 윈도우 인스턴스를 받으면 window_id 가
+         바뀌어 같은 화면이 두 screen_id 로 쪼개지는 회귀가 있었음
+         (예: 000002 vs 000072 = 동일 SmartHomeMainActivity, tree Jaccard 1.0
+         인데 window_id 26 vs 44 라 매처가 비교조차 안 함).
+      2) 버킷 안에서 canonical subtree-hash multiset Jaccard 가 최대이고
          threshold 이상이면 그 key 반환. 트리 모든 깊이의 부분구조 카운트를
-         비교하므로 RN 라우터 sub-route처럼 native 골격만 공유하고 콘텐츠가
-         다른 화면을 분리해 낼 수 있다.
+         비교하므로 RN 라우터 sub-route 처럼 native 골격만 공유하고 콘텐츠가
+         다른 화면은 Jaccard 가 낮아 자연히 분리된다.
       3) 매칭 실패면 None → 호출자가 신규 화면으로 등록 (해시 폴백).
 
     candidate의 tree_signature가 비면(예: XML dump 실패, YOLO-only) 구조
@@ -79,7 +84,7 @@ def match_screen(
     if not cand_sig:
         return None
 
-    cand_win = candidate.window_id
+    cand_pkg = getattr(candidate, "package", None) or None
     cand_act = candidate.activity or None
     cand_rot = getattr(candidate, "rotation", 0) or 0
 
@@ -87,7 +92,7 @@ def match_screen(
     best_sim = -1.0
 
     for key, scr in existing.items():
-        if scr.window_id != cand_win:
+        if (getattr(scr, "package", None) or None) != cand_pkg:
             continue
         if (scr.activity or None) != cand_act:
             continue

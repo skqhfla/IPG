@@ -5,7 +5,11 @@ from typing import Any
 from core.app_types import Screen
 from core.detection.base import BaseDetector
 from core.detection.ocr_fill import fill_element_text_from_ocr
-from core.detection.postprocess import filter_elements_by_modal_if_detected, normalize_elements
+from core.detection.postprocess import (
+    filter_elements_by_modal_if_detected,
+    filter_elements_to_viewport,
+    normalize_elements,
+)
 from core.detection.result import DetectionResult
 from core.detection.screen_id import build_screen_id
 
@@ -45,6 +49,11 @@ class YOLODetector(BaseDetector):
         filtered = filter_elements_by_modal_if_detected(
             merged_elements=elements,
             model_elements=elements,
+        )
+
+        filtered = filter_elements_to_viewport(
+            filtered,
+            viewport_wh=self.ctx.screen_wh,
         )
 
         elements = normalize_elements(filtered)

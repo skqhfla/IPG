@@ -21,6 +21,10 @@ class Element:
 
     is_actionable: bool = True
     is_scrollable: bool = False
+    # a11y AccessibilityNodeInfo.isVisibleToUser. 스크롤로 viewport 밖에 있거나
+    # 부모 컨테이너에 clip된 노드는 False. YOLO 경로처럼 a11y 정보가 없는 element는
+    # 시각적으로 검출됐다는 사실 자체가 visible의 증거이므로 기본 True.
+    is_visible_to_user: bool = True
     swipe_directions_tried: set[str] = field(default_factory=set)
     swipe_directions_exhausted: set[str] = field(default_factory=set)
 

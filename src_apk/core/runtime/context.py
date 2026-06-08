@@ -84,6 +84,29 @@ class RuntimeContext:
     a11y_listener: A11yEventListener | None = None
     memory_saver: MemorySaver | None = None
 
+    # transition 게이트 상태: 직전 detection 시점의 screen_id 값과 listener
+    # transition_seq 스냅샷. 다음 detection 진입 시 비교해 카운터 증가가 없으면
+    # 매처를 건너뛰고 같은 screen_id 를 재사용 — intra-screen 갱신(스크롤·
+    # 컨텐츠 변화)으로 트리 시그니처가 살짝 흔들려도 screen_id 가 유지된다.
+    last_screen_id_value: str | None = None
+    last_transition_seq: int = 0
+    # logcat 드롭 방어선: XML 의 identity 속성(activity/window_id/rotation)
+    # 직전 값. logcat 이 STATE_CHANGED 를 놓쳐 trans_seq 가 변화 없음에도 dump
+    # 자체의 identity 가 바뀌었다면 게이트를 강제 해제하고 매처를 호출. 매처는
+    # window_id 를 버킷에서 제외하므로 같은 화면 재방문(window_id 만 새로 발급
+    # 받은 케이스)은 Jaccard 로 자연히 합쳐지고, 진짜 다른 화면(Jaccard 낮음)
+    # 만 분리된다.
+    last_activity: str | None = None
+    last_package: str | None = None
+    last_rotation: int = 0
+    last_window_id: int | None = None
+    # 직전 등록된 화면의 visible-only tree_signature. 게이트 4속성
+    # (activity/window_id/package/rotation)이 모두 일치하더라도 본문 fragment
+    # 가 통째로 교체된 케이스(Xiaomi 하단 탭 — STATE_CHANGED/SELECTED 이벤트가
+    # 안 떠 trans_seq·identity 모두 변화 없음)를 잡기 위해, content Jaccard 가
+    # match_threshold 미만이면 게이트를 해제해 매처를 호출한다.
+    last_tree_signature: tuple[str, ...] = field(default_factory=tuple)
+
     @property
     def screen_wh(self) -> tuple[int, int] | None:
         if self.device_meta is None:

@@ -22,6 +22,7 @@ from core.config import (
     TraversalConfig,
     UiDetectionMode,
 )
+from core.runtime.observe_runner import ObserveRunner
 from core.runtime.runner import Runner
 from core.runtime.setup_runner import SetupRunner
 from core.utils.path_manager import PathManager
@@ -42,7 +43,7 @@ def make_default_settings() -> Settings:
             stability_max_wait_sec=3.0,
             stability_required_matches=2,
             swipe_directions=("down", "up"),
-            swipe_settle_ms=500,
+            swipe_settle_ms=1200,
             scroll_overlap_ratio=0.3,
             scroll_swipe_duration_ms=800,
             max_consecutive_scrolls=12,
@@ -146,6 +147,23 @@ def main() -> None:
         )
         try:
             setup.run()
+        except A11yServiceUnavailable as e:
+            logger.error(f"[A11Y] {e}")
+            print(f"\n[ABORT] {e}\n", file=sys.stderr)
+            sys.exit(2)
+        return
+
+    if args.observe:
+        observer = ObserveRunner(
+            settings=settings,
+            paths=paths,
+            app_name=args.app,
+            device_serial=args.serial,
+            adb_path="adb",
+            logger=logger,
+        )
+        try:
+            observer.run()
         except A11yServiceUnavailable as e:
             logger.error(f"[A11Y] {e}")
             print(f"\n[ABORT] {e}\n", file=sys.stderr)

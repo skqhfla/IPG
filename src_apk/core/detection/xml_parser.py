@@ -126,10 +126,25 @@ def compute_tree_signature(root: ET.Element) -> tuple[str, ...]:
     desc 정규화는 시간/날짜/숫자 카운터(`<TIME>/<DATE>/<N>`)만 치환하므로
     네트워크 속도·timestamp 같은 동적 값은 노이즈가 되지 않고, '음소거'·
     '전체화면' 같은 안정 라벨은 그대로 hash에 들어가 화면 변화를 잡는다.
+
+    visible-to-user="false" 노드(및 그 subtree)는 시그니처에서 제외한다 —
+    스크롤로 viewport 밖에 있는 노드는 같은 화면이 아니라 다른 viewport(=다른
+    screen_id)의 콘텐츠로 본다. 속성 자체가 없는 구버전 dump 노드는 visible로
+    간주한다.
     """
     bag: list[str] = []
     _subtree_hash(root, bag)
     return tuple(sorted(bag))
+
+
+def _is_visible_node(node: ET.Element) -> bool:
+    """visible-to-user 속성이 'false'면 False, 그 외(부재 포함)면 True."""
+    if node.tag != "node":
+        return True
+    v = node.attrib.get("visible-to-user")
+    if v is None:
+        return True
+    return v.lower() != "false"
 
 
 def _subtree_hash(node: ET.Element, out: list[str]) -> str:
@@ -140,7 +155,11 @@ def _subtree_hash(node: ET.Element, out: list[str]) -> str:
         desc = _normalize_desc((node.attrib.get("content-desc") or "").strip())
         label = f"{cls}[d:{desc}]" if desc else cls
 
-    child_hashes = [_subtree_hash(c, out) for c in list(node)]
+    child_hashes: list[str] = []
+    for child in list(node):
+        if not _is_visible_node(child):
+            continue
+        child_hashes.append(_subtree_hash(child, out))
     child_hashes.sort()
 
     serial = f"{label}({','.join(child_hashes)})"
@@ -201,6 +220,14 @@ def parse_uia_xml_text(
 
             is_scrollable = (attrs.get("scrollable", "").lower() == "true")
 
+            # APK가 emit한 isVisibleToUser. 속성이 없는 구버전 dump는 True로
+            # 두어 회귀 없이 viewport·scrollable-parent 기하 검사로만 떨어지게 한다.
+            v2u_raw = attrs.get("visible-to-user")
+            if v2u_raw is None:
+                is_visible_to_user = True
+            else:
+                is_visible_to_user = v2u_raw.lower() == "true"
+
             # unlabeled layout / viewgroup는 직접 element로 만들지 않고 자식만 탐색.
             # 단, scrollable container는 swipe target이 되어야 하므로 유지.
             if (
@@ -222,6 +249,7 @@ def parse_uia_xml_text(
                     text=attrs.get("text") or None,
                     description=attrs.get("content-desc") or None,
                     is_scrollable=is_scrollable,
+                    is_visible_to_user=is_visible_to_user,
                 )
             )
 

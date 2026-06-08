@@ -82,6 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--observe",
+        action="store_true",
+        help=(
+            "Observe mode: don't trigger any events. Stream a11y events while you "
+            "drive the device manually, with periodic target-app packet deltas."
+        ),
+    )
+
+    parser.add_argument(
         "--rerun",
         type=str,
         default=None,

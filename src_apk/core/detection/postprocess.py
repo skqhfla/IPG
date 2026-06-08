@@ -4,6 +4,73 @@ from __future__ import annotations
 from core.app_types import BBox, Element
 
 
+def _bbox_center_in_rect(b: BBox, x1: int, y1: int, x2: int, y2: int) -> bool:
+    cx, cy = b.cx, b.cy
+    return x1 <= cx < x2 and y1 <= cy < y2
+
+
+def _nearest_scrollable_clip(
+    target: Element,
+    scrollables: list[Element],
+) -> BBox | None:
+    """target 중심을 포함하는 가장 작은 scrollable 컨테이너의 bbox(자기 자신 제외)."""
+    cx, cy = target.bbox.cx, target.bbox.cy
+    best: BBox | None = None
+    best_area: int | None = None
+    for s in scrollables:
+        if s is target:
+            continue
+        sb = s.bbox
+        if not (sb.x1 <= cx < sb.x2 and sb.y1 <= cy < sb.y2):
+            continue
+        a = max(1, sb.width) * max(1, sb.height)
+        if best_area is None or a < best_area:
+            best = sb
+            best_area = a
+    return best
+
+
+def filter_elements_to_viewport(
+    elements: list[Element],
+    *,
+    viewport_wh: tuple[int, int] | None,
+) -> list[Element]:
+    """
+    "현재 viewport에 그려져 있는가" 3중 검사로 element를 제거한다. detection
+    결과를 곧바로 screen.elements / app_memory에 박기 전에 적용해, 스크롤로
+    숨겨진 노드는 화면 식별·정책·메모리 어디서도 카운트되지 않게 한다.
+
+      1) a11y가 emit한 isVisibleToUser. APK 정보 그대로 신뢰. visible 속성이
+         없는 노드는 default True라 게이트 통과 → 2·3만 작동.
+      2) bbox 중심이 device viewport 안 (회전 보정된 effective_wh 기준).
+      3) bbox 중심이 가장 안쪽 scrollable 부모의 bbox 안. ScrollView 자식이
+         부모 영역을 넘어 늘어진 케이스(스크롤 밖) 차단.
+    셋 다 통과해야 살아남는다. 스크롤 컨테이너 자체도 동일 기준으로 검사 —
+    화면 밖으로 밀린 컨테이너에 swipe 좌표를 잡아 ADB가 헛 swipe 하는 회귀를
+    막는다.
+    """
+    if not elements:
+        return elements
+
+    scrollables_all = [el for el in elements if el.is_scrollable]
+
+    kept: list[Element] = []
+    for el in elements:
+        if not el.is_visible_to_user:
+            continue
+        if viewport_wh is not None:
+            w, h = viewport_wh
+            if not _bbox_center_in_rect(el.bbox, 0, 0, w, h):
+                continue
+        clip = _nearest_scrollable_clip(el, scrollables_all)
+        if clip is not None and not _bbox_center_in_rect(
+            el.bbox, clip.x1, clip.y1, clip.x2, clip.y2
+        ):
+            continue
+        kept.append(el)
+    return kept
+
+
 DANGER_KEYWORDS = {
     "로그인",
     "로그아웃",

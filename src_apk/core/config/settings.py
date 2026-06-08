@@ -50,7 +50,7 @@ class TraversalConfig:
     stability_required_matches: int
     excluded_streak_threshold: int = 3
     swipe_directions: tuple[str, ...] = ("down", "up")
-    swipe_settle_ms: int = 500
+    swipe_settle_ms: int = 1200
     # 연속 스크롤 viewport 간 최소 겹침 비율 (0.3 → 30% overlap 보장).
     scroll_overlap_ratio: float = 0.3
     # 스크롤 swipe 지속시간(ms). 길수록 fling(관성 스크롤)이 줄어

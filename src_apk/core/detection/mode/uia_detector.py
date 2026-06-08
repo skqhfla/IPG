@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from core.app_types import Screen
 from core.detection.base import BaseDetector
-from core.detection.postprocess import normalize_elements
+from core.detection.postprocess import (
+    filter_elements_to_viewport,
+    normalize_elements,
+)
 from core.detection.result import DetectionResult
 from core.detection.screen_id import build_screen_id
 
@@ -19,9 +22,14 @@ class UIAutomatorDetector(BaseDetector):
             self.dump_and_parse_ui_xml(xml_path)
         )
 
-        elements = normalize_elements(elements)
-
         effective_wh = self.ctx.effective_screen_wh(meta.rotation)
+
+        elements = filter_elements_to_viewport(
+            elements,
+            viewport_wh=effective_wh,
+        )
+
+        elements = normalize_elements(elements)
 
         screen_id = build_screen_id(
             self.ctx.settings,

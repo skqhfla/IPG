@@ -70,10 +70,24 @@ class A11yEventListener:
 
     # '화면이 아직 그려지고 있다'는 신호로 간주할 a11y 이벤트 타입.
     # wait_for_content_quiet가 이 타입 이벤트의 도착 간격으로 안정성을 판정.
+    # VIEW_SELECTED 도 포함: 탭 스왑 직후 5건 정도의 SELECTED 버스트가 있어
+    # 그게 settle 될 때까지 기다려야 새 페인이 다 그려진 상태로 캡처된다.
     CONTENT_EVENT_TYPES: tuple[str, ...] = (
         "WINDOW_CONTENT_CHANGED",
         "VIEW_SCROLLED",
         "WINDOW_STATE_CHANGED",
+        "VIEW_SELECTED",
+    )
+
+    # 화면 정체성(screen_id) 재평가를 트리거해야 하는 이벤트 타입.
+    # - WINDOW_STATE_CHANGED: activity/window 전환 (확정적 신호)
+    # - VIEW_SELECTED: BottomNavigation 등 intra-activity 탭 스왑 시 SELECTED
+    #   가 ancestor chain 따라 버블링되며 다발로 발생 → 무조건 매처 재평가.
+    # - WINDOWS_CHANGED: windowChanges 가 ADDED/REMOVED 인 경우만 (다이얼로그/
+    #   바텀시트 등 윈도우 토폴로지 변화). FOCUSED/LAYER 등은 트리거 아님.
+    TRANSITION_EVENT_TYPES: tuple[str, ...] = (
+        "WINDOW_STATE_CHANGED",
+        "VIEW_SELECTED",
     )
 
     def __init__(
@@ -98,7 +112,18 @@ class A11yEventListener:
         # 큐를 소비하지 않고 폴링으로 안정성을 판정할 수 있게 한다 — 다른
         # 컨슈머(wait_for_scroll_evt, request_dump_and_wait)의 큐 사용과 충돌 없음.
         self._content_seq = 0
+        # 화면 정체성 재평가가 필요한 전환 신호(STATE_CHANGED / SELECTED /
+        # WINDOWS_CHANGED-top-level)가 도착할 때마다 증가. runner가 매처 호출
+        # 게이팅에 사용 — 직전 detection 이후 이 값이 그대로면 같은 화면으로
+        # 단정해 매처를 건너뛰고 element memory만 갱신.
+        self._transition_seq = 0
         self._seq_lock = threading.Lock()
+
+        # IME(소프트 키보드) 가시성 캐시. listener APK 가 IME_VISIBLE / IME_HIDDEN
+        # 이벤트를 emit 하므로 dumpsys 폴링 없이 즉시 조회 가능. SERVICE_CONNECTED
+        # 직후 seed 도 받아 초기 상태도 정확.
+        self._ime_visible = False
+        self._ime_visible_ts: float = 0.0
 
     # -----------------------------
     # lifecycle
@@ -150,12 +175,17 @@ class A11yEventListener:
             self._instr_proc = None
         # Belt-and-suspenders: kill the on-device process so a hung
         # instrumentation doesn't leak a UiAutomation registration.
-        try:
-            self._client.shell_text(
-                f"am force-stop {self.LISTENER_PACKAGE}", check=False, timeout=5.0,
-            )
-        except Exception:
-            pass
+        # 중요: instrumentation 테스트가 실제로 도는 프로세스는 TEST_PACKAGE
+        # (dev.ipg.listener.test) — LISTENER_PACKAGE(앱 본체)만 죽이면 테스트가
+        # 좀비로 남아 UiAutomation 리스너는 살아있지만 run()의 trigger 폴링
+        # while-loop가 끊겨 다음 세션의 dump가 무반응이 됨.
+        for pkg in (self.TEST_PACKAGE, self.LISTENER_PACKAGE):
+            try:
+                self._client.shell_text(
+                    f"am force-stop {pkg}", check=False, timeout=5.0,
+                )
+            except Exception:
+                pass
 
     # -----------------------------
     # queue ops
@@ -248,6 +278,37 @@ class A11yEventListener:
         """현재까지 누적된 content/scroll/state-change 이벤트 카운터."""
         with self._seq_lock:
             return self._content_seq
+
+    def transition_seq(self) -> int:
+        """화면 정체성 재평가 트리거(WINDOW_STATE_CHANGED / VIEW_SELECTED /
+        WINDOWS_CHANGED with ADDED/REMOVED)의 누적 카운터.
+
+        runner가 detection 직전·직후에 이 값을 비교해 변화가 없으면 매처를
+        건너뛰고 직전 screen_id 를 그대로 재사용한다. 큐를 건드리지 않고
+        폴링만 하므로 다른 컨슈머와 안전하게 공존."""
+        with self._seq_lock:
+            return self._transition_seq
+
+    def is_ime_visible(self) -> bool:
+        """현재 IME(소프트 키보드) 가 떠 있는지. listener APK 가 emit 한
+        IME_VISIBLE/IME_HIDDEN 이벤트로 갱신된 캐시를 반환 — dumpsys 호출 없음
+        (per-tap 400ms 이전 비용 제거). listener APK 가 구버전(IME 이벤트 미지원)
+        이면 False 로 굳어 있을 수 있으므로, runtime 측에서 dumpsys 폴백을 같이
+        고려할 수 있다."""
+        return self._ime_visible
+
+    def _is_transition_event(self, evt: A11yEvent) -> bool:
+        """screen 정체성 재평가가 필요한 이벤트인지 판정.
+
+        WINDOWS_CHANGED 는 windowChanges 가 ADDED/REMOVED 인 경우만 트리거 —
+        FOCUSED/LAYER/BOUNDS 같은 토폴로지 미변경 신호는 무시. windowChanges
+        는 APK 가 '|' joined string 으로 직렬화 (예: 'ADDED|TITLE')."""
+        if evt.type in self.TRANSITION_EVENT_TYPES:
+            return True
+        if evt.type == "WINDOWS_CHANGED":
+            wc = str(evt.raw.get("windowChanges", ""))
+            return "ADDED" in wc or "REMOVED" in wc
+        return False
 
     def wait_for_content_quiet(
         self,
@@ -437,9 +498,23 @@ class A11yEventListener:
                     target_package=self._target_package,
                 )
 
+            # IME 가시성 캐시 — APK listener 가 AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            # 윈도우의 추가/제거를 감지해 IME_VISIBLE / IME_HIDDEN 한 줄만 emit.
+            # 상태 변화 시점만 오므로 last-write-wins 로 OK. dumpsys 폴링(400ms) 대체.
+            if evt.type == "IME_VISIBLE":
+                self._ime_visible = True
+                self._ime_visible_ts = time.monotonic()
+            elif evt.type == "IME_HIDDEN":
+                self._ime_visible = False
+                self._ime_visible_ts = time.monotonic()
+
             if evt.type in self.CONTENT_EVENT_TYPES:
                 with self._seq_lock:
                     self._content_seq += 1
+
+            if self._is_transition_event(evt):
+                with self._seq_lock:
+                    self._transition_seq += 1
 
             self._log_event(evt)
 
