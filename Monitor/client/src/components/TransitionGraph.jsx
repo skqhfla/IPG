@@ -142,7 +142,10 @@ function GraphInner({ data, jsonPath, blobUrlMap }) {
     data.edges.forEach(e => {
       if (selectedIds.includes(e.src) && e.event_key) {
         const parts = e.event_key.split('@');
-        if (parts.length > 1) ids.add(parts[1]);
+        // event_key 예: "tap@el_0003" / "swipe@el_0003|dir=down"
+        // element_id만 추출한다('|' 이후 dir 메타는 제거) — 안 떼면 swipe 전환의
+        // 트리거 element가 el.element_id와 매칭되지 않는다.
+        if (parts.length > 1) ids.add(parts[1].split('|')[0]);
       }
     });
     return ids;

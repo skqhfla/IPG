@@ -176,12 +176,15 @@ function buildTreeFromFileList(fileList) {
 }
 
 // ── 파일 아이템 (서버/로컬 공용 재귀 트리) ─────────────────────────
+// 서버 모드에선 item.path 가 절대경로라 Inspector 로 그대로 보낼 수 있다.
+// 폴더 hover 시 노출되는 🔍 버튼이 onSendToInspector(path) 를 호출.
 function FileItem({
   item,
   depth = 0,
   onSelect,
   selectedFile,
   mode,
+  onSendToInspector,
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState(item.children || []);
@@ -219,6 +222,8 @@ function FileItem({
     }
   };
 
+  const canInspect = isDir && mode === 'server' && onSendToInspector;
+
   return (
     <>
       <div
@@ -229,6 +234,15 @@ function FileItem({
       >
         <span className="file-icon">{loading ? '⏳' : icon}</span>
         <span className="file-name">{item.name}</span>
+        {canInspect && (
+          <button
+            className="file-action"
+            title="Screen ID 검사 탭으로 보내기"
+            onClick={(e) => { e.stopPropagation(); onSendToInspector(item.path); }}
+          >
+            🔍
+          </button>
+        )}
       </div>
 
       {isDir && expanded && children.map(child => (
@@ -239,22 +253,55 @@ function FileItem({
           onSelect={onSelect}
           selectedFile={selectedFile}
           mode={mode}
+          onSendToInspector={onSendToInspector}
         />
       ))}
     </>
   );
 }
 
+const LS_SERVER_PATH = 'sidebar_server_path';
+
 // ── Sidebar 메인 ──────────────────────────────────────────────────
-export default function Sidebar({ onFileSelect, onRunLoad, collapsed }) {
+export default function Sidebar({ onFileSelect, onRunLoad, onSendToInspector, collapsed }) {
   const [path, setPath] = useState('');
-  const [mode, setMode] = useState('idle');   // 'idle' | 'local'
+  const [mode, setMode] = useState('idle');   // 'idle' | 'local' | 'server'
   const [items, setItems] = useState([]);     // 트리
   const [blobUrlMap, setBlobUrlMap] = useState({});
   const [selectedFile, setSelectedFile] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [serverPathInput, setServerPathInput] = useState(
+    () => localStorage.getItem(LS_SERVER_PATH) || ''
+  );
   const fileInputRef = useRef(null);
+
+  // ── 서버 경로 열기 ─────────────────────────────────────────────
+  // /api/browse 로 절대경로의 1단계 목록을 받아온 뒤 mode='server' 로 설정.
+  // 트리 안 하위 폴더는 FileItem 의 expand 시 /api/browse 가 재귀적으로 호출.
+  const handleOpenServerPath = async (rawPath) => {
+    const target = (rawPath || serverPathInput || '').trim();
+    if (!target) {
+      setError('서버 경로를 입력하세요.');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const res = await axios.get(`/api/browse?path=${encodeURIComponent(target)}`);
+      const tree = res.data.items || [];
+      setPath(target);
+      setItems(tree);
+      setBlobUrlMap({});
+      setMode('server');
+      setSelectedFile('');
+      localStorage.setItem(LS_SERVER_PATH, target);
+    } catch (err) {
+      setError('서버 경로 열기 실패: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // ── 열기 버튼 ─────────────────────────────────────────────────
   // ── 폴더 선택 다이얼로그 ──────────────────────────────────────
@@ -426,15 +473,32 @@ export default function Sidebar({ onFileSelect, onRunLoad, collapsed }) {
     <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       <div className="sidebar-header">
         <span className="sidebar-title">파일 브라우저</span>
-        {mode === 'local' && (
-          <span className="sidebar-mode-badge">로컬</span>
-        )}
+        {mode === 'local'  && <span className="sidebar-mode-badge">로컬</span>}
+        {mode === 'server' && <span className="sidebar-mode-badge server">서버</span>}
       </div>
 
       <div className="path-input-group">
         <button className="path-btn-large" onClick={handleBrowse} disabled={loading}>
           {loading ? '데이터 로딩 중…' : '📂 분석 폴더 선택'}
         </button>
+
+        <div className="server-path-row">
+          <input
+            className="server-path-input"
+            value={serverPathInput}
+            onChange={e => setServerPathInput(e.target.value)}
+            placeholder="서버 절대 경로 (예: d:\IoTPacketGenerator\IPG\outputs_APK)"
+            onKeyDown={e => { if (e.key === 'Enter') handleOpenServerPath(); }}
+          />
+          <button
+            className="server-path-btn"
+            onClick={() => handleOpenServerPath()}
+            disabled={loading || !serverPathInput.trim()}
+            title="서버 절대경로로 파일 트리 열기 — 폴더의 🔍 아이콘으로 Screen ID 검사로 보낼 수 있음"
+          >
+            🗄
+          </button>
+        </div>
 
         {path && (
           <div className="current-path-info">
@@ -477,6 +541,7 @@ export default function Sidebar({ onFileSelect, onRunLoad, collapsed }) {
               onSelect={handleSelect}
               selectedFile={selectedFile}
               mode={mode}
+              onSendToInspector={onSendToInspector}
             />
           ))
         ) : (

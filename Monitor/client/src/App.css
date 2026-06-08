@@ -153,6 +153,28 @@ body {
   flex: 1;
 }
 
+.header-control-btn {
+  padding: 6px 14px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-right: 16px;
+  transition: all 0.12s ease;
+}
+.header-control-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.header-control-btn.active {
+  background: var(--accent-glow);
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
 .header-stats {
   display: flex;
   align-items: center;
@@ -924,3 +946,53 @@ body {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
   white-space: nowrap;
 }
+/* ── Sidebar: 서버 모드 진입 + 행별 액션 ───────────── */
+.sidebar-mode-badge.server {
+  background: rgba(37, 99, 235, 0.15);
+  color: #5b9eff;
+  border-color: rgba(37, 99, 235, 0.4);
+}
+.server-path-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+.server-path-input {
+  flex: 1;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+  min-width: 0;
+}
+.server-path-input:focus { border-color: var(--accent); }
+.server-path-btn {
+  padding: 6px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.server-path-btn:hover { background: var(--bg-hover); }
+.server-path-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.file-item .file-action {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.1s, color 0.1s;
+  flex-shrink: 0;
+}
+.file-item:hover .file-action { opacity: 1; }
+.file-item .file-action:hover { color: #5b9eff; }

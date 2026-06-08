@@ -41,7 +41,10 @@ function buildGraphData(run) {
     }
   }
 
-  return { nodes, edges };
+  // screens: bbox 오버레이가 node.screen_id로 element를 역참조한다.
+  // 누락하면 TransitionGraph의 data.screens가 undefined가 되어 오버레이 전체가
+  // 그려지지 않는다(bbox·트리거 element 모두 사라짐).
+  return { nodes, edges, screens };
 }
 
 export default function GraphTab({ run }) {

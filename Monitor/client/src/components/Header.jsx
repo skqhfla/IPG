@@ -1,4 +1,4 @@
-export default function Header({ graphData, sidebarCollapsed, onToggleSidebar }) {
+export default function Header({ graphData, sidebarCollapsed, onToggleSidebar, controlActive, onToggleControl, liveActive, onToggleLive, sidActive, onToggleSid }) {
   const nodeCount = graphData?.nodes?.length ?? 0;
   const edgeCount = graphData?.edges?.length ?? 0;
 
@@ -20,6 +20,30 @@ export default function Header({ graphData, sidebarCollapsed, onToggleSidebar })
       <span className="header-badge">v1.0</span>
 
       <div className="header-spacer" />
+
+      <button
+        className={`header-control-btn ${liveActive ? 'active' : ''}`}
+        onClick={onToggleLive}
+        title="라이브 모니터 (화면/이벤트/패킷/XML)"
+      >
+        📺 라이브 모니터
+      </button>
+
+      <button
+        className={`header-control-btn ${controlActive ? 'active' : ''}`}
+        onClick={onToggleControl}
+        title="기기 제어 패널 (adb)"
+      >
+        🎮 기기 제어
+      </button>
+
+      <button
+        className={`header-control-btn ${sidActive ? 'active' : ''}`}
+        onClick={onToggleSid}
+        title="Screen ID 검사 (XML → screen_id + 매칭 trace)"
+      >
+        🔍 Screen ID
+      </button>
 
       {graphData && (
         <div className="header-stats">

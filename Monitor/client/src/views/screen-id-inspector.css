@@ -1,0 +1,736 @@
+.sid-inspector {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 18px;
+  gap: 14px;
+  overflow: auto;
+  background: #0e1418;
+  color: #d8dee4;
+  font-size: 13px;
+}
+
+.sid-inspector h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  color: #f0f3f5;
+}
+
+.sid-toolbar {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto auto;
+  gap: 10px;
+  align-items: end;
+  padding: 10px 12px;
+  background: #16202a;
+  border: 1px solid #233140;
+  border-radius: 6px;
+}
+
+.sid-toolbar.two-col {
+  grid-template-columns: 2fr 1fr auto auto;
+}
+
+.sid-advanced {
+  font-size: 12px;
+}
+
+.sid-advanced-toggle {
+  background: none;
+  border: none;
+  color: #7d8b97;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.sid-advanced-toggle:hover { color: #d8dee4; }
+
+.sid-advanced-body {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: #11181f;
+  border: 1px solid #1f2a35;
+  border-radius: 5px;
+}
+
+.sid-advanced-body input {
+  padding: 7px 10px;
+  background: #0c141a;
+  color: #d8dee4;
+  border: 1px solid #2c3a48;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.sid-advanced-body input:focus { border-color: #2f8fd6; }
+
+.sid-advanced-body button {
+  padding: 7px 12px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sid-advanced-body button.secondary { background: #2c3a48; color: #d8dee4; }
+.sid-advanced-body button:hover     { background: #1d4ed8; }
+.sid-advanced-body button.secondary:hover { background: #38485a; }
+.sid-advanced-body button:disabled  { background: #374151; color: #6b7280; cursor: not-allowed; }
+
+.sid-toolbar input,
+.sid-toolbar select {
+  width: 100%;
+  padding: 7px 10px;
+  background: #0c141a;
+  color: #d8dee4;
+  border: 1px solid #2c3a48;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.sid-toolbar input:focus,
+.sid-toolbar select:focus {
+  border-color: #2f8fd6;
+}
+
+.sid-toolbar label {
+  font-size: 11px;
+  color: #98a4af;
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sid-toolbar .hint {
+  font-size: 11px;
+  color: #6b7785;
+  margin-top: 3px;
+}
+
+.sid-toolbar button {
+  padding: 8px 14px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sid-toolbar button.secondary {
+  background: #2c3a48;
+  color: #d8dee4;
+}
+
+.sid-toolbar button:hover { background: #1d4ed8; }
+.sid-toolbar button.secondary:hover { background: #38485a; }
+
+.sid-toolbar button:disabled {
+  background: #374151;
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+.sid-error {
+  padding: 10px 12px;
+  background: #2d1a1a;
+  border: 1px solid #6b2828;
+  border-radius: 5px;
+  color: #f0a0a0;
+}
+
+/* 결과 영역 = 좌(이미지) + 우(trace) 분할 */
+.sid-split {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .sid-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sid-image-pane {
+  position: sticky;
+  top: 16px;
+  background: #16202a;
+  border: 1px solid #233140;
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sid-image-pane .pane-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #7d8b97;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sid-image-pane .img-wrap {
+  background: #0c141a;
+  border: 1px solid #1f2a35;
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  max-height: 70vh;
+}
+
+.sid-image-pane img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  display: block;
+}
+
+.sid-image-pane .img-missing {
+  color: #6b7785;
+  font-size: 12px;
+  padding: 40px 16px;
+  text-align: center;
+}
+
+.sid-image-pane .img-meta {
+  font-size: 11px;
+  color: #98a4af;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 8px;
+}
+
+.sid-image-pane .img-meta .k { color: #7d8b97; }
+.sid-image-pane .img-meta .v {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  color: #d8dee4;
+  word-break: break-all;
+}
+
+/* 우측 trace */
+.sid-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sid-card {
+  background: #16202a;
+  border: 1px solid #233140;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.sid-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #7d8b97;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+
+.sid-id-banner {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.sid-id-banner .id-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sid-id-banner .id-label {
+  font-size: 11px;
+  color: #7d8b97;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sid-id-banner .id-value {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 17px;
+  font-weight: 600;
+  color: #f0f3f5;
+  letter-spacing: 0.02em;
+}
+
+.sid-id-banner .id-value.fresh   { color: #5bd8a0; }
+.sid-id-banner .id-value.current { color: #ffb547; }
+
+.sid-id-banner .id-mismatch {
+  color: #f0a0a0;
+  font-size: 12px;
+  margin-top: 4px;
+  max-width: 380px;
+}
+
+.sid-id-banner .id-match {
+  color: #5bd8a0;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.sid-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 18px;
+}
+
+.sid-meta-grid div span { display: block; }
+
+.sid-meta-grid .k {
+  font-size: 11px;
+  color: #7d8b97;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+
+.sid-meta-grid .v {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 13px;
+  color: #d8dee4;
+  word-break: break-all;
+}
+
+.sid-build-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sid-build-step {
+  display: grid;
+  grid-template-columns: 22px 110px 1fr;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.sid-build-step .step-num {
+  width: 22px;
+  height: 22px;
+  background: #2c3a48;
+  color: #98a4af;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sid-build-step .step-label {
+  font-size: 12px;
+  color: #98a4af;
+  padding-top: 3px;
+}
+
+.sid-build-step .step-value {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 12.5px;
+  color: #d8dee4;
+  background: #0c141a;
+  border: 1px solid #233140;
+  border-radius: 4px;
+  padding: 6px 8px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.sid-build-step .step-value.highlight {
+  color: #5bd8a0;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.sid-sig-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.sid-sig-chip {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  color: #98a4af;
+  background: #0c141a;
+  border: 1px solid #233140;
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+
+.sid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.sid-table th,
+.sid-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #1f2a35;
+}
+
+.sid-table th {
+  font-size: 11px;
+  color: #7d8b97;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: #11181f;
+}
+
+.sid-table tr.out-of-bucket td { color: #5d6975; }
+
+.sid-table td.mono {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+}
+
+.sid-table td.jaccard-cell {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  text-align: right;
+  font-weight: 600;
+}
+
+.sid-table tr.is-match td { background: rgba(91, 216, 160, 0.07); }
+
+.sid-table .pass-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: #1a3a26;
+  color: #5bd8a0;
+  font-weight: 600;
+}
+
+.sid-table .fail-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: #3a1a1a;
+  color: #f0a0a0;
+  font-weight: 600;
+}
+
+.sid-decision {
+  font-size: 13px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: #0c141a;
+  border-left: 3px solid #2563eb;
+}
+
+.sid-decision.matched     { border-left-color: #5bd8a0; }
+.sid-decision.not-matched { border-left-color: #ffb547; }
+
+.sid-empty {
+  text-align: center;
+  color: #6b7785;
+  padding: 60px 20px;
+  font-size: 13px;
+}
+
+/* ── 기기 dump 분석 배너 ──────────────────────────── */
+.sid-dump-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.sid-dump-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  background: linear-gradient(90deg, rgba(91, 158, 255, 0.12), rgba(91, 158, 255, 0.02));
+  border: 1px solid rgba(91, 158, 255, 0.35);
+  border-radius: 6px;
+}
+.sid-dump-banner-main {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+}
+.sid-dump-hierarchy {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11px;
+  color: #d8dee4;
+  margin-top: 4px;
+}
+.sid-dump-hierarchy b {
+  color: #7d8b97;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  margin-right: 4px;
+}
+.sid-dump-hierarchy span {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+}
+.sid-dump-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  background: #2563eb;
+  color: white;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  margin-right: 10px;
+}
+.sid-dump-label {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 13px;
+  color: #f0f3f5;
+}
+.sid-dump-source {
+  margin-left: 6px;
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  color: #7d8b97;
+}
+.sid-dump-close {
+  padding: 6px 12px;
+  background: #2c3a48;
+  color: #d8dee4;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sid-dump-close:hover { background: #38485a; }
+
+.sid-partial-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border-radius: 9px;
+  background: #3a2a1a;
+  color: #ffb547;
+  font-weight: 600;
+}
+
+/* ── 핀 버튼 ───────────────────────────────────────── */
+.sid-pin-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: #2c3a48;
+  color: #d8dee4;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.sid-pin-btn:hover { background: #38485a; }
+.sid-pin-btn.active {
+  background: #2563eb;
+  color: white;
+}
+
+/* ── 비교 패널 ────────────────────────────────────── */
+.sid-compare {
+  background: #16202a;
+  border: 1px solid #233140;
+  border-radius: 6px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sid-compare-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.sid-compare-header .title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f0f3f5;
+}
+.sid-compare-header .link {
+  background: none;
+  border: none;
+  color: #98a4af;
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+}
+.sid-compare-header .link:hover { color: #f0a0a0; }
+
+.sid-compare-hint {
+  font-size: 12px;
+  color: #98a4af;
+  padding: 8px 10px;
+  background: #0c141a;
+  border-radius: 4px;
+}
+.sid-compare-hint code {
+  background: #1f2a35;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+}
+
+.sid-compare-section .section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #7d8b97;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+/* 매트릭스 */
+.sid-matrix {
+  border-collapse: collapse;
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 12.5px;
+}
+.sid-matrix th, .sid-matrix td {
+  padding: 6px 10px;
+  text-align: center;
+  border: 1px solid #233140;
+  min-width: 70px;
+}
+.sid-matrix th {
+  background: #11181f;
+  color: #98a4af;
+  font-weight: 600;
+}
+.sid-matrix td { color: #f0f3f5; font-weight: 600; }
+
+.sid-matrix-legend {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.sid-matrix-legend > span {
+  padding: 1px 8px;
+  border-radius: 9px;
+  color: #f0f3f5;
+}
+
+/* 컬럼들 */
+.sid-compare-columns {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.sid-compare-col {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: #0c141a;
+  border: 1px solid #1f2a35;
+  border-radius: 5px;
+}
+
+.sid-compare-col.error { border-color: #6b2828; }
+.sid-compare-col.is-dump {
+  border-color: rgba(91, 158, 255, 0.5);
+  background: rgba(91, 158, 255, 0.06);
+}
+
+.sid-compare-col .col-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+}
+.sid-compare-col .col-head button {
+  background: none;
+  border: none;
+  color: #7d8b97;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+}
+.sid-compare-col .col-head button:hover { color: #f0a0a0; }
+
+.sid-compare-col .col-img {
+  background: #050a0e;
+  border: 1px solid #1f2a35;
+  border-radius: 3px;
+  height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.sid-compare-col .col-img img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.sid-compare-col .col-img .img-missing {
+  color: #6b7785;
+  font-size: 11px;
+}
+
+.sid-compare-col .col-id {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #5bd8a0;
+  word-break: break-all;
+  text-align: center;
+  padding: 4px;
+  background: #11181f;
+  border-radius: 3px;
+}
+
+.sid-compare-col .col-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 8px;
+  font-size: 11px;
+}
+.sid-compare-col .col-meta .k { color: #7d8b97; }
+.sid-compare-col .col-meta .v {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  color: #d8dee4;
+  word-break: break-all;
+}
